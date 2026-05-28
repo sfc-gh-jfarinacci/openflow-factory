@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openflow-factory"
+version = "0.1.0"
+description = "Python SDK for Snowflake OpenFlow ingestion pipelines"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.25",
+    "snowflake-connector-python>=3.6",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pyjwt[crypto]>=2.8",
+    "cryptography>=41.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+cli = ["typer>=0.9"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "respx>=0.20", "ruff>=0.3"]
+
+[project.scripts]
+openflow-factory = "ingestion_engine.cli:app"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

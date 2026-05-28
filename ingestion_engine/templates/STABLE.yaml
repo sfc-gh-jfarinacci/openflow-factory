@@ -1,0 +1,5 @@
+postgres_full: v1
+postgres_cdc: v1
+postgres_incremental: v1
+sqlserver_full: v1
+mysql_full: v1

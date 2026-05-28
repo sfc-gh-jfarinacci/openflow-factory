@@ -1,0 +1,41 @@
+template_id: postgres_cdc
+version: v1
+backend: openflow
+supported_contract_versions: [v1]
+source_sgdb: postgres
+strategy: cdc
+promote_strategy: append
+
+required_params:
+  source:
+    - key: "PostgreSQL Connection URL"
+      type: string
+    - key: "PostgreSQL Username"
+      type: string
+    - key: "PostgreSQL Password"
+      type: secret
+    - key: "PostgreSQL JDBC Driver"
+      type: asset
+    - key: "Replication Slot Name"
+      type: string
+    - key: "Publication Name"
+      type: string
+  destination:
+    - key: "Destination Database"
+      type: string
+    - key: "Destination Schema Pattern"
+      type: string
+    - key: "Snowflake Account URL"
+      type: string
+    - key: "Snowflake User"
+      type: string
+    - key: "Snowflake Private Key"
+      type: secret
+
+secrets:
+  - "PostgreSQL Password"
+  - "Snowflake Private Key"
+
+backend_dependencies:
+  - "postgresql-42.7.x.jar"
+  - "External Access Integration"

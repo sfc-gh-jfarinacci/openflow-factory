@@ -1,0 +1,17 @@
+version: v1
+source_sgdb: postgres
+type: full
+cron: "0 2 * * *"
+
+source_config:
+  host: your-source-nlb.elb.us-west-2.amazonaws.com
+  port: 5432
+  database: ecommerce
+  schema: dbo
+  tables:
+    - name: cliente
+      pii_columns: [cpf, email, nome, sobrenome]
+    - name: endereco
+      pii_columns: [rua, bairro, numero]
+    - name: pedido
+      pii_columns: []

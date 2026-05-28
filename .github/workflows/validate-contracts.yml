@@ -1,0 +1,30 @@
+name: Validate Contracts
+
+on:
+  pull_request:
+    paths:
+      - 'data_contracts/**/*.yaml'
+      - 'data_contracts/schema/**'
+      - 'data_contracts/scripts/**'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: data_contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install jsonschema pyyaml
+
+      - name: Validate contracts against schema
+        run: python scripts/validate_contracts.py
+
+      - name: Check naming conventions
+        run: python scripts/lint_naming.py

@@ -1,0 +1,52 @@
+template_id: postgres_full
+version: v1
+backend: openflow
+supported_contract_versions: [v1]
+source_sgdb: postgres
+strategy: full
+promote_strategy: swap
+
+parameter_context: "Postgres Full Params"
+
+param_mapping:
+  - param: "Postgres Host"
+    source: "source_config.host"
+    default: "localhost"
+  - param: "Postgres Port"
+    source: "source_config.port"
+    default: "5432"
+  - param: "Postgres Database"
+    source: "source_config.database"
+  - param: "Postgres Username"
+    source: "source_config.username"
+    default: ""
+  - param: "Postgres Password"
+    source: "source_config.password"
+    sensitive: true
+  - param: "Postgres Driver"
+    type: asset
+    default: ""
+  - param: "cron"
+    source: "cron"
+    default: "0 */5 * * * ?"
+  - param: "chunk_rows"
+    source: "chunk_rows"
+    default: "500000"
+  - param: "Tables To Fetch"
+    source: "_tables_json"
+    computed: true
+  - param: "Destination Database"
+    source: "_domain"
+    transform: "upper"
+  - param: "Destination Schema"
+    default: "BRONZE"
+  - param: "Snowflake Warehouse"
+    source: "config.snowflake_warehouse"
+    default: "OPENFLOW_FACTORY_WH"
+
+secrets:
+  - "Postgres Password"
+
+backend_dependencies:
+  - "postgresql-42.7.x.jar"
+  - "External Access Integration"
