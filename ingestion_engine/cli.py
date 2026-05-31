@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -173,6 +174,517 @@ def validate_contract(
     except jsonschema.ValidationError as e:
         typer.echo(f"  FAILED: {e.message}")
         raise typer.Exit(1)
+
+
+@app.command()
+def list_assets(
+    pg_id: str = typer.Argument(..., help="Process group ID"),
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+):
+    """List assets attached to a flow's parameter context."""
+    from ingestion_engine.flow.flow import Flow
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            ctx_data = await client.get_parameter_context_by_pg(pg_id)
+            if not ctx_data:
+                typer.echo("  No parameter context found for this process group")
+                return
+            ctx_id = ctx_data.get("id") or ctx_data.get("component", {}).get("id")
+            assets = await client.list_assets(ctx_id)
+            if not assets:
+                typer.echo("  No assets found")
+                return
+            for a in assets:
+                typer.echo(f"  {a.get('id', '?')[:8]}  {a.get('name', '?')}")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
+
+
+@app.command()
+def upload_asset(
+    pg_id: str = typer.Argument(..., help="Process group ID"),
+    file: str = typer.Argument(..., help="Path to the asset file (e.g. ./postgresql-42.7.4.jar)"),
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+    param_name: Optional[str] = typer.Option(None, "--param", "-p", help="Parameter name to update with the asset path"),
+):
+    """Upload an asset to a flow's parameter context (skips if same name exists)."""
+    from ingestion_engine.flow.flow import Flow
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+    file_path = Path(file)
+    if not file_path.exists():
+        typer.echo(f"  File not found: {file_path}")
+        raise typer.Exit(1)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            ctx_data = await client.get_parameter_context_by_pg(pg_id)
+            if not ctx_data:
+                typer.echo("  No parameter context found")
+                raise typer.Exit(1)
+            ctx_id = ctx_data.get("id") or ctx_data.get("component", {}).get("id")
+            asset = await client.ensure_asset(ctx_id, file_path.name, file_path.read_bytes())
+            asset_id = asset.get("id", "")
+            asset_name = asset.get("name", file_path.name)
+            typer.echo(f"  Asset: {asset_name} (id={asset_id[:8]})")
+
+            if param_name:
+                await client.link_asset_to_parameter(ctx_id, param_name, asset_id)
+                typer.echo(f"  Linked asset to param '{param_name}' as reference asset")
+            else:
+                typer.echo(f"  Uploaded (use --param to link to a parameter)")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
+
+
+@app.command()
+def delete_asset(
+    pg_id: str = typer.Argument(..., help="Process group ID"),
+    asset_id: str = typer.Argument(..., help="Asset ID to delete"),
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+):
+    """Delete an asset from a flow's parameter context."""
+    from ingestion_engine.flow.flow import Flow
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            ctx_data = await client.get_parameter_context_by_pg(pg_id)
+            if not ctx_data:
+                typer.echo("  No parameter context found")
+                raise typer.Exit(1)
+            ctx_id = ctx_data.get("id") or ctx_data.get("component", {}).get("id")
+            await client.delete_asset(ctx_id, asset_id)
+            typer.echo(f"  Deleted asset {asset_id}")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
+
+
+@app.command()
+def create_secret(
+    fqn: str = typer.Argument(..., help="Fully qualified secret name (e.g. OPENFLOW_FACTORY.SECRETS.MY_SECRET)"),
+    value: str = typer.Option(..., "--value", "-v", prompt=True, hide_input=True, help="Secret value (prompted securely if not provided)"),
+    comment: Optional[str] = typer.Option(None, "--comment"),
+):
+    """Create a Snowflake GENERIC_STRING secret for use with SnowflakeParameterProvider."""
+    from ingestion_engine.secrets import Secrets
+
+    config = EngineConfig()
+    secrets = Secrets(config)
+    info = secrets.create_named(fqn, value, comment=comment)
+    secrets.close()
+    typer.echo(f"  Created: {info.fqn}")
+
+
+@app.command()
+def create_contract_secrets(
+    path: str = typer.Argument(..., help="Contract path relative to contracts dir"),
+    contracts_dir: str = typer.Option("./data_contracts", "--contracts-dir", "-d"),
+):
+    """Create Snowflake secrets referenced in a contract. Prompts for each value.
+
+    Reads the contract's `secrets` map (param_name → secret_fqn) and creates
+    each secret as GENERIC_STRING in OPENFLOW_FACTORY.SECRETS.
+    """
+    import yaml as _yaml
+    from ingestion_engine.secrets import Secrets
+
+    contracts_root = Path(contracts_dir)
+    contract_file = contracts_root / path
+    if not contract_file.exists():
+        typer.echo(f"  Contract not found: {contract_file}")
+        raise typer.Exit(1)
+
+    contract = _yaml.safe_load(contract_file.read_text())
+    secrets_map = contract.get("secrets", {})
+    if not secrets_map:
+        typer.echo("  No secrets defined in contract")
+        raise typer.Exit(0)
+
+    config = EngineConfig()
+    secrets = Secrets(config)
+
+    for param_name, secret_fqn in secrets_map.items():
+        if secrets.exists_by_fqn(secret_fqn):
+            typer.echo(f"  Exists: {secret_fqn}")
+            continue
+        val = typer.prompt(f"  Enter value for '{param_name}' ({secret_fqn})", hide_input=True)
+        info = secrets.create_named(secret_fqn, val, comment=f"Sensitive param: {param_name}")
+        typer.echo(f"  Created: {info.fqn}")
+
+    secrets.close()
+
+
+@app.command()
+def list_secrets(
+    database: Optional[str] = typer.Option(None, "--database", "-db"),
+    schema: Optional[str] = typer.Option(None, "--schema", "-s"),
+):
+    """List Snowflake secrets available for parameter providers."""
+    from ingestion_engine.secrets import Secrets
+
+    config = EngineConfig()
+    secrets = Secrets(config)
+    rows = secrets.list_secrets(database=database, schema=schema)
+    secrets.close()
+    if not rows:
+        typer.echo("  No secrets found")
+        return
+    for r in rows:
+        typer.echo(f"  {r['fqn']:60s} {r['secret_type']}")
+
+
+@app.command()
+def list_parameter_providers(
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+):
+    """List parameter providers configured on the runtime."""
+    from ingestion_engine.flow.flow import Flow
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            providers = await client.list_parameter_providers()
+            if not providers:
+                typer.echo("  No parameter providers configured")
+                return
+            for p in providers:
+                status = p.get("validation_status", "?")
+                typer.echo(f"  {p['id'][:12]}  {p['name']:40s} [{status}]")
+                groups = p.get("parameter_group_configurations", [])
+                for g in groups:
+                    ctx_name = g.get("parameterContextName", g.get("groupName", "?"))
+                    typer.echo(f"               → {ctx_name}")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
+
+
+@app.command()
+def list_parameter_provider_types(
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+):
+    """List available parameter provider types on the runtime."""
+    from ingestion_engine.flow.flow import Flow
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            types = await client.get_parameter_provider_types()
+            for t in types:
+                typer.echo(f"  {t['type']}")
+                if t.get("description"):
+                    desc = t["description"].strip().split("\n")[0][:80]
+                    typer.echo(f"    {desc}")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
+
+
+@app.command()
+def setup_snowflake_parameter_provider(
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+    name: str = typer.Option("Snowflake Secrets Provider", "--name", "-n"),
+    database: Optional[str] = typer.Option(None, "--database", "-db", help="Snowflake database to fetch secrets from"),
+    schema_pattern: Optional[str] = typer.Option(None, "--schema-pattern", help="Regex pattern for schema filtering"),
+    secret_pattern: Optional[str] = typer.Option(None, "--secret-pattern", help="Regex pattern for secret name filtering"),
+):
+    """Create and configure a SnowflakeParameterProvider with a SNOWFLAKE_SESSION_TOKEN connection service."""
+    from ingestion_engine.flow.flow import Flow
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            existing = await client.list_parameter_providers()
+            for p in existing:
+                if p["name"] == name:
+                    typer.echo(f"  Already exists: {p['id']}")
+                    return
+
+            svc = await client.create_root_controller_service(
+                name=f"Snowflake Connection ({name})",
+                service_type="com.snowflake.openflow.runtime.services.snowflake.SnowflakeConnectionService",
+                bundle={
+                    "group": "com.snowflake.openflow.runtime",
+                    "artifact": "runtime-snowflake-connection-service-nar",
+                    "version": "2026.5.5.19",
+                },
+                properties={"Authentication Strategy": "SNOWFLAKE_SESSION_TOKEN"},
+            )
+            svc_id = svc.get("id") or svc.get("component", {}).get("id")
+            await client.enable_root_controller_service(svc_id)
+
+            props: dict = {"Snowflake Connection Service": svc_id}
+            if database:
+                props["Database Name"] = database
+            if schema_pattern:
+                props["Schema Name Pattern"] = schema_pattern
+            if secret_pattern:
+                props["Secret Name Pattern"] = secret_pattern
+
+            provider = await client.create_parameter_provider(
+                name=name,
+                provider_type="com.snowflake.openflow.runtime.parameter.snowflake.SnowflakeParameterProvider",
+                bundle={
+                    "group": "com.snowflake.openflow.runtime",
+                    "artifact": "runtime-snowflake-parameter-provider-nar",
+                    "version": "2026.5.5.19",
+                },
+                properties=props,
+            )
+            provider_id = provider.get("id") or provider.get("component", {}).get("id")
+            validation = provider.get("component", {}).get("validationStatus", "?")
+            typer.echo(f"  Created provider: {provider_id} [{validation}]")
+            typer.echo(f"  Connection service: {svc_id} [ENABLED]")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
+
+
+@app.command()
+def fetch_params(
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+    provider_id: Optional[str] = typer.Option(None, "--provider-id", "-p", help="Parameter provider ID (auto-detects if only one exists)"),
+):
+    """Fetch parameters from a parameter provider (discovers secrets from Snowflake)."""
+    from ingestion_engine.flow.flow import Flow
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            pid = provider_id
+            if not pid:
+                providers = await client.list_parameter_providers()
+                if not providers:
+                    typer.echo("  No parameter providers configured")
+                    raise typer.Exit(1)
+                if len(providers) == 1:
+                    pid = providers[0]["id"]
+                else:
+                    typer.echo("  Multiple providers found, specify --provider-id:")
+                    for p in providers:
+                        typer.echo(f"    {p['id']}  {p['name']}")
+                    raise typer.Exit(1)
+
+            result = await client.fetch_parameters(pid)
+            req_id = result.get("parameterProviderParameterFetchRequest", {}).get("id") or result.get("id")
+            if req_id:
+                final = await client.wait_for_fetch(pid, req_id)
+                groups = final.get("parameterGroups") or final.get("parameterGroupConfigurations") or []
+                typer.echo(f"  Fetch complete. Found {len(groups)} parameter group(s):")
+                for g in groups:
+                    group_name = g.get("groupName", g.get("name", "?"))
+                    params = g.get("parameterSensitivities", g.get("parameters", {}))
+                    typer.echo(f"    {group_name}: {len(params)} parameter(s)")
+                    for pname in (params if isinstance(params, dict) else []):
+                        typer.echo(f"      - {pname}")
+            else:
+                typer.echo(f"  Fetch initiated: {result}")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
+
+
+@app.command()
+def populate_secrets(
+    path: str = typer.Argument(..., help="Contract path relative to contracts dir"),
+    pg_id: str = typer.Option(..., "--pg-id", help="Process group ID of the deployed flow"),
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+    contracts_dir: str = typer.Option("./data_contracts", "--contracts-dir", "-d"),
+):
+    """Fetch secrets from Snowflake via ParameterProvider and apply to the flow's parameter context.
+
+    Uses the contract's `secrets.schema` to configure the provider fetch scope,
+    then applies the fetched group to the flow's bound parameter context.
+    Secret names in Snowflake must match the NiFi parameter names exactly.
+    """
+    import yaml as _yaml
+    from ingestion_engine.flow.flow import Flow
+
+    contracts_root = Path(contracts_dir)
+    contract_file = contracts_root / path
+    if not contract_file.exists():
+        typer.echo(f"  Contract not found: {contract_file}")
+        raise typer.Exit(1)
+
+    contract = _yaml.safe_load(contract_file.read_text())
+    secrets_spec = contract.get("secrets", {})
+    schema = secrets_spec.get("schema")
+    if not schema:
+        typer.echo("  No secrets.schema defined in contract")
+        raise typer.Exit(0)
+
+    schema_parts = schema.split(".")
+    db_name = schema_parts[0] if len(schema_parts) >= 1 else None
+    schema_name = schema_parts[1] if len(schema_parts) >= 2 else None
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            providers = await client.list_parameter_providers()
+            pid = None
+            for p in providers:
+                if p.get("properties", {}).get("Database Name") == db_name:
+                    schema_pat = p.get("properties", {}).get("Schema Name Pattern", "")
+                    if not schema_pat or schema_name in schema_pat:
+                        pid = p["id"]
+                        break
+
+            if not pid:
+                if len(providers) == 1:
+                    pid = providers[0]["id"]
+                    typer.echo(f"  Using existing provider: {providers[0]['name']}")
+                else:
+                    typer.echo("  No matching parameter provider found. Run setup-snowflake-parameter-provider first.")
+                    raise typer.Exit(1)
+
+            result = await client.fetch_parameters(pid)
+            req_id = result.get("parameterProviderParameterFetchRequest", {}).get("id") or result.get("id")
+            if not req_id:
+                typer.echo("  Fetch failed")
+                raise typer.Exit(1)
+
+            final = await client.wait_for_fetch(pid, req_id)
+            groups = final.get("parameterGroups") or final.get("parameterGroupConfigurations") or []
+
+            target_group = None
+            for g in groups:
+                group_name = g.get("groupName", g.get("name", ""))
+                if group_name == schema or schema_name in group_name:
+                    target_group = g
+                    break
+
+            if not target_group:
+                typer.echo(f"  No parameter group matching '{schema}' found after fetch. Available: {[g.get('groupName') for g in groups]}")
+                raise typer.Exit(1)
+
+            ctx_data = await client.get_parameter_context_by_pg(pg_id)
+            if not ctx_data:
+                typer.echo("  No parameter context found for this process group")
+                raise typer.Exit(1)
+            ctx_name = ctx_data.get("component", {}).get("name", "")
+
+            group_name = target_group.get("groupName", target_group.get("name", ""))
+            sensitivities = target_group.get("parameterSensitivities", {})
+
+            apply_configs = [{
+                "groupName": group_name,
+                "parameterContextName": ctx_name,
+                "parameterSensitivities": sensitivities,
+                "synchronized": False,
+            }]
+
+            await client.apply_fetched_parameters(pid, apply_configs)
+            typer.echo(f"  Applied secrets from '{group_name}' → context '{ctx_name}'")
+            for pname in sensitivities:
+                typer.echo(f"    ✓ {pname}")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
+
+
+@app.command()
+def apply_params(
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+    provider_id: Optional[str] = typer.Option(None, "--provider-id", "-p"),
+    context_name: Optional[str] = typer.Option(None, "--context", "-c", help="Target parameter context name (creates if needed)"),
+):
+    """Fetch parameters from provider and apply them to a parameter context."""
+    from ingestion_engine.flow.flow import Flow
+
+    config = EngineConfig()
+    flow = Flow(config, runtime)
+
+    async def _run():
+        client = await flow._get_client()
+        try:
+            pid = provider_id
+            if not pid:
+                providers = await client.list_parameter_providers()
+                if len(providers) == 1:
+                    pid = providers[0]["id"]
+                else:
+                    typer.echo("  Specify --provider-id")
+                    raise typer.Exit(1)
+
+            result = await client.fetch_parameters(pid)
+            req_id = result.get("parameterProviderParameterFetchRequest", {}).get("id") or result.get("id")
+            if not req_id:
+                typer.echo("  Fetch failed")
+                raise typer.Exit(1)
+
+            final = await client.wait_for_fetch(pid, req_id)
+            groups = final.get("parameterGroups") or final.get("parameterGroupConfigurations") or []
+
+            if not groups:
+                typer.echo("  No parameter groups found after fetch")
+                raise typer.Exit(1)
+
+            apply_configs = []
+            for g in groups:
+                group_name = g.get("groupName", g.get("name", ""))
+                sensitivities = g.get("parameterSensitivities", {})
+                target_ctx = context_name or group_name
+                apply_configs.append({
+                    "groupName": group_name,
+                    "parameterContextName": target_ctx,
+                    "parameterSensitivities": sensitivities,
+                    "synchronized": False,
+                })
+
+            apply_result = await client.apply_fetched_parameters(pid, apply_configs)
+            typer.echo(f"  Applied {len(apply_configs)} group(s) to parameter context(s)")
+            for ac in apply_configs:
+                typer.echo(f"    {ac['groupName']} → context '{ac['parameterContextName']}'")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+    flow.close()
 
 
 if __name__ == "__main__":

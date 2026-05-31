@@ -52,7 +52,22 @@ The engine deploys **flows to existing runtimes only**. It does not create or ma
 
 ### 4. Source credentials
 
-Sensitive parameters (database passwords, private keys) are configured manually in the OpenFlow UI after the flow is deployed. The engine deploys the flow with all non-sensitive parameters populated from the contract; sensitive fields are left empty and must be set by hand in the NiFi parameter context.
+Sensitive parameters (database passwords, private keys) are stored as Snowflake secrets and resolved at deploy time via the SnowflakeParameterProvider running inside SPCS. No credentials leave Snowflake.
+
+```sql
+-- Create a secret for the source database password
+CREATE OR REPLACE SECRET OPENFLOW_FACTORY.SECRETS.ECOMMERCE_PASSWORD
+  TYPE = GENERIC_STRING
+  SECRET_STRING = '<password>';
+```
+
+The contract references the secret by FQN — the engine handles fetch, apply, inheritance, and property remapping automatically.
+
+A SnowflakeParameterProvider must be configured on the runtime (one-time setup via CLI or UI):
+
+```bash
+ingestion-engine setup-snowflake-parameter-provider -r test
+```
 
 ### 5. Service user key pair
 
@@ -99,10 +114,9 @@ pip install -e ".[cli]"
 ### Deploy a contract
 
 ```bash
-python -m ingestion_engine.cli deploy-contract fraud/ecommerce/postgres_full.yaml \
+ingestion-engine deploy-contract fraud/ecommerce/postgres_full.yaml \
   --sha $(git rev-parse HEAD) \
-  --runtime OPENFLOW_RUNTIME_AED416FD_308C_8176_B547_65098431F752 \
-  --contracts-dir ./data-contracts \
+  -r test \
   --start
 ```
 
@@ -118,16 +132,25 @@ python -m ingestion_engine.cli deploy-contract fraud/ecommerce/postgres_full.yam
 
 ```bash
 # Validate a contract YAML against schema
-python -m ingestion_engine.cli validate-contract fraud/ecommerce/postgres_full.yaml
+ingestion-engine validate-contract fraud/ecommerce/postgres_full.yaml
 
 # List available runtimes
-python -m ingestion_engine.cli list-runtimes
+ingestion-engine list-runtimes
 
 # Check flow health
-python -m ingestion_engine.cli healthcheck <process_group_id> --runtime <runtime_name>
+ingestion-engine healthcheck <process_group_id> -r test
 
 # Trigger a run
-python -m ingestion_engine.cli run <process_group_id> --runtime <runtime_name>
+ingestion-engine run <process_group_id> -r test
+
+# Create secrets for a contract (prompts for values)
+ingestion-engine create-contract-secrets fraud/ecommerce/postgres_full.yaml
+
+# List parameter providers on a runtime
+ingestion-engine list-parameter-providers -r test
+
+# Setup SnowflakeParameterProvider (one-time per runtime)
+ingestion-engine setup-snowflake-parameter-provider -r test
 ```
 
 ---
@@ -174,7 +197,7 @@ data-contracts/fraud/ecommerce/postgres_full.yaml
 openflow-dag-factory/
 ├── .env                           # Engine config (Snowflake creds)
 ├── openflow_factory_svc.pem       # Service user private key (git-ignored)
-├── data-contracts/                # Source of truth — YAML contracts
+├── data_contracts/                # Source of truth — YAML contracts
 │   ├── schema/contract.v1.schema.json
 │   ├── scripts/                   # CI validators
 │   └── fraud/ecommerce/postgres_full.yaml
@@ -223,7 +246,7 @@ openflow-dag-factory/
 | Runtime creation/deletion | Manual via OpenFlow UI |
 | Runtime start/stop lifecycle | Manual (API not yet available) |
 | External Access Integration | Manual setup per source |
-| Secrets management | Credentials set in parameter context; secret reference mechanism TBD |
+| Secrets management | Resolved via SnowflakeParameterProvider at deploy time (values never leave Snowflake) |
 | Parameter-context-only updates | Not supported (NiFi blocks updates while services reference params); engine always does full replace |
 | CDC / Incremental templates | Template stubs exist; flow.json not yet authored |
 
@@ -243,8 +266,8 @@ deployer = Deployer(config)
 result = asyncio.run(deployer.deploy_from_contract(
     contract_path="fraud/ecommerce/postgres_full.yaml",
     sha="abc123",
-    contracts_dir=Path("./data-contracts"),
-    runtime_name_override="OPENFLOW_RUNTIME_...",
+    contracts_dir=Path("./data_contracts"),
+    runtime_name_override="test",
     auto_start=True,
 ))
 
@@ -252,8 +275,8 @@ result = asyncio.run(deployer.deploy_from_contract(
 result = asyncio.run(deployer.deploy_from_contract(
     contract_path="fraud/ecommerce/postgres_full.yaml",
     sha="abc123",
-    contracts_dir=Path("./data-contracts"),
-    runtime_name_override="OPENFLOW_RUNTIME_...",
+    contracts_dir=Path("./data_contracts"),
+    runtime_name_override="test",
     force=True,
     auto_start=True,
 ))
@@ -282,13 +305,20 @@ A data contract is a YAML file that fully describes one ingestion pipeline. It l
 version: v1
 source_sgdb: postgres
 type: full
-cron: "0 2 * * *"
+cron: "0 */5 * * * ?"
+
+secrets:
+  Postgres Password: OPENFLOW_FACTORY.SECRETS.ECOMMERCE_PASSWORD
+
+assets:
+  Postgres Driver: postgresql-42.7.11.jar
 
 source_config:
   host: my-nlb.elb.us-west-2.amazonaws.com
   port: 5432
   database: ecommerce
   schema: dbo
+  username: postgres
   tables:
     - name: cliente
       pii_columns: [cpf, email, nome, sobrenome]
@@ -353,7 +383,7 @@ Without the manifest, the renderer would need per-template code. With it, the re
 
 ### Roadmap
 
-- **Secrets integration** — figure out how to reference Snowflake secrets from OpenFlow parameter contexts, replacing manual sensitive parameter configuration after deploy
+- ~~Secrets integration~~ — **Done.** SnowflakeParameterProvider fetches secrets from `OPENFLOW_FACTORY.SECRETS`, applies to a provider-owned context, inherited into the flow's param context, service properties remapped automatically
 - **Runtime management** — when available, add support for runtime creation, deletion, start/stop to enable full orchestrator-driven lifecycle
 - **Testing** — introduce unit tests for renderer/selector, integration tests against ephemeral runtimes
 - **More templates** — author `flow.json` for `sqlserver_full`, `postgres_cdc`, `postgres_incremental`, `mysql_full`, etc.
@@ -365,3 +395,9 @@ Without the manifest, the renderer would need per-template code. With it, the re
 Licensed under the Apache License, Version 2.0. See [LICENSE](../LICENSE) for details.
 
 Copyright 2026 Jorge Farinacci
+
+
+
+## APIs
+
+https://nifi.apache.org/nifi-docs/rest-api.html

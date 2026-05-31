@@ -91,6 +91,8 @@ class Flow:
 
             pg_id, import_method = await self._import_flow(client, root_id, name, flow)
 
+            await self._ensure_param_context_linked(client, pg_id, flow, substituted_params)
+
             runtime_node_map = self._build_node_map(flow)
 
             started = False
@@ -222,6 +224,43 @@ class Flow:
                 return pg_id, "upload"
             except Exception as upload_err:
                 raise DeployError(f"Both /import and /upload failed.\n  /import: {import_err}\n  /upload: {upload_err}")
+
+    async def _ensure_param_context_linked(
+        self,
+        client: NiFiClient,
+        pg_id: str,
+        flow: dict,
+        params: dict[str, dict[str, str]],
+    ) -> Optional[str]:
+        existing = await client.get_parameter_context_by_pg(pg_id)
+        if existing:
+            ctx_id = existing.get("id") or existing.get("component", {}).get("id")
+            return ctx_id
+
+        param_contexts = flow.get("parameterContexts") or {}
+        if not param_contexts:
+            return None
+
+        ctx_name = next(iter(param_contexts))
+        ctx_def = param_contexts[ctx_name]
+        raw_params = ctx_def.get("parameters", [])
+
+        param_values = params.get(ctx_name, {})
+        nifi_params = []
+        for p in raw_params:
+            name_val = p.get("name", "")
+            value = param_values.get(name_val, p.get("value", ""))
+            nifi_params.append({
+                "name": name_val,
+                "value": value,
+                "sensitive": p.get("sensitive", False),
+            })
+
+        ctx = await client.ensure_parameter_context(ctx_name, nifi_params)
+        ctx_id = ctx.get("id", "")
+        if ctx_id:
+            await client.link_parameter_context(pg_id, ctx_id)
+        return ctx_id
 
     def _build_node_map(self, flow: dict) -> dict:
         node_map: dict[str, dict] = {}

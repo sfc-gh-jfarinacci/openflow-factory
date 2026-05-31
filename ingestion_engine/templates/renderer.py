@@ -11,10 +11,13 @@ def render(
     manifest: dict,
     *,
     secret_fqn: Optional[str] = None,
+    secret_values: Optional[dict[str, str]] = None,
     config: Optional[EngineConfig] = None,
 ) -> dict:
     context_name = manifest.get("parameter_context", "default")
     mappings = manifest.get("param_mapping", [])
+
+    secrets_map = contract.get("secrets", {})
 
     enriched = _enrich_contract(contract, config)
 
@@ -22,6 +25,9 @@ def render(
     for m in mappings:
         param_name = m["param"]
         sensitive = m.get("sensitive", False)
+
+        if m.get("type") == "asset":
+            continue
 
         if m.get("computed"):
             value = str(enriched.get(m.get("source", ""), m.get("default", "")))
@@ -36,7 +42,12 @@ def render(
         elif transform == "lower":
             value = str(value).lower()
 
-        if sensitive and secret_fqn:
+        if sensitive and param_name in secrets_map:
+            if secret_values and param_name in secret_values:
+                value = secret_values[param_name]
+            else:
+                continue
+        elif sensitive and secret_fqn:
             value = f"${{secret('{secret_fqn}', '{param_name}')}}"
 
         params[param_name] = str(value)
@@ -88,4 +99,4 @@ def derive_target_fqn(domain: str, source_sgdb: str, source_schema: str, source_
 
 
 def derive_runtime_name(domain: str, filename_stem: str) -> str:
-    return f"{domain}_{filename_stem}"
+    return f"{domain}{filename_stem}".replace("_", "").lower()

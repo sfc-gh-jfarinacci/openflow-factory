@@ -1,13 +1,20 @@
 version: v1
 source_sgdb: postgres
 type: full
-cron: "0 2 * * *"
+cron: "0 */5 * * * ?"
+
+secrets:
+  Postgres Password: OPENFLOW_FACTORY.SECRETS.ECOMMERCE_PASSWORD
+
+assets:
+  Postgres Driver: postgresql-42.7.11.jar
 
 source_config:
   host: your-source-nlb.elb.us-west-2.amazonaws.com
   port: 5432
   database: ecommerce
   schema: dbo
+  username: postgres
   tables:
     - name: cliente
       pii_columns: [cpf, email, nome, sobrenome]

@@ -18,6 +18,9 @@ from ingestion_engine.templates.renderer import render, derive_runtime_name
 from ingestion_engine.templates.selector import select_template
 
 
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+
+
 @dataclass
 class DeployResult:
     flow: FlowDeployResult
@@ -181,15 +184,8 @@ class Deployer:
 
         tpl = select_template(contract["source_sgdb"], contract["type"])
         manifest = tpl["manifest"]
-        secret_fqn = None
-        if connector_id:
-            import re
-            sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", connector_id).upper()
-            if not sanitized[0:1].isalpha() and sanitized[0:1] != "_":
-                sanitized = f"C_{sanitized}"
-            secret_fqn = f"OPENFLOW_FACTORY.SECRETS.{sanitized}_CREDS"
 
-        params = render(contract, manifest, secret_fqn=secret_fqn, config=self._config)
+        params = render(contract, manifest, config=self._config)
 
         prev = self._get_last_deployment(runtime_name)
 
@@ -212,8 +208,31 @@ class Deployer:
             name=runtime_name,
             params=params,
             connector_id=connector_id,
-            auto_start=auto_start,
+            auto_start=False,
         )
+
+        await self._resolve_assets(
+            flow_result.process_group_id,
+            manifest,
+            template_dir=tpl.get("template_dir"),
+            contract_assets=contract.get("assets"),
+        )
+
+        await self._resolve_secrets(
+            flow_result.process_group_id,
+            contract,
+            manifest,
+        )
+
+        if auto_start:
+            client = await self._flow._get_client()
+            try:
+                await client.enable_controller_services(flow_result.process_group_id)
+                await asyncio.sleep(1.5)
+                await client.start_process_group(flow_result.process_group_id)
+                flow_result.started = True
+            finally:
+                await client.close()
 
         self._record_deployment(
             runtime_name=runtime_name,
@@ -225,6 +244,105 @@ class Deployer:
         )
 
         return DeployResult(flow=flow_result)
+
+    async def _resolve_secrets(
+        self,
+        pg_id: str,
+        contract: dict,
+        manifest: dict,
+    ) -> None:
+        secrets_map = contract.get("secrets", {})
+        if not secrets_map:
+            return
+
+        client = await self._flow._get_client()
+        try:
+            providers = await client.list_parameter_providers()
+            if not providers:
+                return
+            provider_id = providers[0]["id"]
+
+            await client.fetch_parameters(provider_id)
+            await asyncio.sleep(2)
+
+            provider = await client._get(f"parameter-providers/{provider_id}")
+            groups = provider.get("component", {}).get("parameterGroupConfigurations", [])
+
+            secret_fqns = list(secrets_map.values())
+            if not secret_fqns:
+                return
+            first_fqn = secret_fqns[0]
+            parts = first_fqn.split(".")
+            target_schema = f"{parts[0]}.{parts[1]}" if len(parts) >= 3 else ""
+
+            target_group = None
+            for g in groups:
+                if g.get("groupName", "") == target_schema:
+                    target_group = g
+                    break
+
+            if not target_group:
+                return
+
+            secret_names = [fqn.split(".")[-1] for fqn in secret_fqns]
+            sensitivities = {name: "SENSITIVE" for name in secret_names}
+
+            ctx_name = f"Secrets - {contract.get('_domain', 'default')}"
+
+            all_ctxs = await client.get_parameter_contexts()
+            secrets_ctx_id = None
+            for c in all_ctxs:
+                if c.get("component", {}).get("name") == ctx_name:
+                    secrets_ctx_id = c.get("component", {}).get("id")
+                    break
+
+            if not secrets_ctx_id:
+                await client.apply_fetched_parameters(provider_id, [{
+                    "groupName": target_group["groupName"],
+                    "parameterContextName": ctx_name,
+                    "parameterSensitivities": sensitivities,
+                    "synchronized": True,
+                }])
+
+                all_ctxs = await client.get_parameter_contexts()
+                for c in all_ctxs:
+                    if c.get("component", {}).get("name") == ctx_name:
+                        secrets_ctx_id = c.get("component", {}).get("id")
+                        break
+
+            if not secrets_ctx_id:
+                return
+
+            ctx_data = await client.get_parameter_context_by_pg(pg_id)
+            if not ctx_data:
+                return
+            flow_ctx_id = ctx_data.get("component", {}).get("id") or ctx_data.get("id")
+
+            await client.inherit_parameter_context(flow_ctx_id, secrets_ctx_id)
+
+            source_sgdb = contract.get("source_sgdb", "").lower()
+            for param_name, secret_fqn in secrets_map.items():
+                secret_obj_name = secret_fqn.split(".")[-1]
+                svcs = await client.list_controller_services(pg_id)
+                for s in svcs:
+                    comp = s.get("component", {})
+                    svc_type = comp.get("type", "").lower()
+                    svc_name = comp.get("name", "").lower()
+                    if "snowflake" in svc_type or "snowflake" in svc_name:
+                        continue
+                    if source_sgdb not in svc_type and source_sgdb not in svc_name:
+                        if "dbcp" not in svc_type and "hikari" not in svc_type and "connection" not in svc_name:
+                            continue
+                    descs = comp.get("descriptors", {})
+                    for prop_key, desc in descs.items():
+                        if desc.get("sensitive"):
+                            keyword = param_name.split()[-1].lower()
+                            if keyword in prop_key.lower():
+                                await client.update_controller_service_properties(
+                                    comp["id"], {prop_key: f"#{{{secret_obj_name}}}"}
+                                )
+        finally:
+            await client.close()
 
     async def _update_params(self, pg_id: str, params: dict[str, dict[str, str]], auto_start: bool) -> bool:
         client = await self._flow._get_client()
@@ -261,12 +379,125 @@ class Deployer:
     async def _replace_flow(self, pg_id: str) -> None:
         client = await self._flow._get_client()
         try:
-            await client.stop_process_group(pg_id)
-            await asyncio.sleep(2)
-            await client.drain_queues(pg_id)
-            await client.disable_controller_services(pg_id)
-            await asyncio.sleep(3)
-            await client.delete_process_group(pg_id)
+            try:
+                ctx_data = await client.get_parameter_context_by_pg(pg_id)
+                ctx_id = None
+                if ctx_data:
+                    ctx_id = ctx_data.get("component", {}).get("id") or ctx_data.get("id")
+                    ctx_rev = ctx_data.get("revision", {}).get("version", 0)
+                    inherited = ctx_data.get("component", {}).get("inheritedParameterContexts", [])
+                    if inherited:
+                        await client._put(f"parameter-contexts/{ctx_id}", {
+                            "revision": {"version": ctx_rev},
+                            "id": ctx_id,
+                            "component": {"id": ctx_id, "inheritedParameterContexts": []},
+                        })
+
+                await client.stop_process_group(pg_id)
+                await asyncio.sleep(2)
+                await client.drain_queues(pg_id)
+                await client.disable_controller_services(pg_id)
+                await asyncio.sleep(3)
+                await client.delete_process_group(pg_id)
+
+                if ctx_id:
+                    try:
+                        ctx_fresh = await client._get(f"parameter-contexts/{ctx_id}")
+                        fresh_rev = ctx_fresh.get("revision", {}).get("version", 0)
+                        bound = ctx_fresh.get("component", {}).get("boundProcessGroups", [])
+                        if not bound:
+                            await client._delete(f"parameter-contexts/{ctx_id}?version={fresh_rev}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                if "404" in str(e) or "Unable to locate" in str(e):
+                    pass
+                else:
+                    raise
+        finally:
+            await client.close()
+
+    async def _resolve_assets(
+        self,
+        pg_id: str,
+        manifest: dict,
+        template_dir: Optional[str] = None,
+        asset_paths: Optional[dict[str, str]] = None,
+        contract_assets: Optional[dict[str, str]] = None,
+    ) -> dict[str, str]:
+        asset_params = [m for m in manifest.get("param_mapping", []) if m.get("type") == "asset"]
+        if not asset_params and not contract_assets:
+            return {}
+
+        client = await self._flow._get_client()
+        try:
+            ctx_data = await client.get_parameter_context_by_pg(pg_id)
+            if not ctx_data:
+                return {}
+            ctx_id = ctx_data.get("id") or ctx_data.get("component", {}).get("id")
+            if not ctx_id:
+                return {}
+
+            resolved: dict[str, str] = {}
+
+            all_asset_params: dict[str, Optional[str]] = {}
+            for m in asset_params:
+                all_asset_params[m["param"]] = None
+            if contract_assets:
+                for param_name, file_name in contract_assets.items():
+                    all_asset_params[param_name] = file_name
+
+            for param_name, contract_file in all_asset_params.items():
+                file_bytes = None
+                file_name = None
+
+                if contract_file:
+                    search_paths = [ASSETS_DIR / contract_file]
+                    if template_dir:
+                        search_paths.insert(0, Path(template_dir) / "assets" / contract_file)
+                    for sp in search_paths:
+                        if sp.exists():
+                            file_name = sp.name
+                            file_bytes = sp.read_bytes()
+                            break
+                elif asset_paths and param_name in asset_paths:
+                    p = Path(asset_paths[param_name])
+                    if p.exists():
+                        file_name = p.name
+                        file_bytes = p.read_bytes()
+                else:
+                    dep_file = None
+                    for dep in manifest.get("backend_dependencies", []):
+                        if dep.endswith(".jar") or dep.endswith(".pem"):
+                            dep_file = dep
+                            break
+                    if dep_file:
+                        search_paths = []
+                        if template_dir:
+                            search_paths.append(Path(template_dir) / "assets" / dep_file)
+                        search_paths.append(ASSETS_DIR / dep_file)
+                        for sp in search_paths:
+                            if sp.exists():
+                                file_name = sp.name
+                                file_bytes = sp.read_bytes()
+                                break
+
+                asset_id = None
+                if file_bytes and file_name:
+                    asset = await client.ensure_asset(ctx_id, file_name, file_bytes)
+                    asset_id = asset.get("id")
+                else:
+                    existing = await client.list_assets(ctx_id)
+                    for a in existing:
+                        if contract_file and contract_file in (a.get("name") or ""):
+                            asset_id = a.get("id")
+                            break
+
+                if asset_id:
+                    await client.link_asset_to_parameter(ctx_id, param_name, asset_id)
+                    resolved[param_name] = asset_id
+
+            return resolved
         finally:
             await client.close()
 

@@ -71,12 +71,29 @@ class Runtime:
 
     async def resolve(self, runtime_name: str) -> tuple[DiscoveredRuntime, NiFiClient]:
         runtimes = await self.list()
-        target = runtime_name.strip().upper()
-        rt = next((r for r in runtimes if r.name.strip().upper() == target), None)
+        target = runtime_name.strip()
+
+        rt = next((r for r in runtimes if r.name.strip().upper() == target.upper()), None)
+        if not rt:
+            rt = next(
+                (r for r in runtimes if r.base_uri.rstrip("/").split("/")[-1].lower() == target.lower()),
+                None,
+            )
+        if not rt:
+            enabled = [r for r in runtimes if r.enabled]
+            if len(enabled) == 1:
+                rt = enabled[0]
+            elif enabled:
+                available = [
+                    f"{r.base_uri.rstrip('/').split('/')[-1]}" for r in enabled
+                ]
+                raise RuntimeNotFoundError(
+                    f"Runtime '{target}' not found. Available: {available}"
+                )
         if not rt:
             available = [r.name for r in runtimes]
-            raise RuntimeNotFoundError(f"Runtime '{runtime_name.strip()}' not found. Available: {available}")
-        token = await mint_access_token(self._config, runtime_name)
+            raise RuntimeNotFoundError(f"Runtime '{target}' not found. Available: {available}")
+        token = await mint_access_token(self._config, rt.name)
         client = NiFiClient(base_url=rt.base_uri, auth_token=token)
         return rt, client
 
