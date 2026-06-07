@@ -114,29 +114,51 @@ def run(
 @app.command()
 def update_params(
     pg_id: str = typer.Argument(..., help="Process group ID of the deployed flow"),
+    path: str = typer.Argument(..., help="Contract path relative to contracts dir"),
     runtime: str = typer.Option(..., "--runtime", "-r"),
-    params_file: str = typer.Option(
-        ..., "--params", "-p", help="JSON file with param values ({context_name: {key: value}})"
-    ),
+    contracts_dir: str = typer.Option("./data_contracts", "--contracts-dir", "-d"),
     auto_start: bool = typer.Option(True, "--start/--no-start", help="Restart flow after updating (default: yes)"),
 ):
-    """Update parameters on a running flow without redeployment.
+    """Update parameters on a deployed flow from a contract without redeployment.
 
-    Stops the flow, updates parameter context values, then restarts.
+    Re-renders params from the contract, stops the flow, applies new param values,
+    resolves secrets and assets, then restarts.
     """
-    import json
+    import yaml as _yaml
+    from ingestion_engine.templates.renderer import render
+    from ingestion_engine.templates.selector import select_template
 
-    params = json.loads(Path(params_file).read_text())
+    contract_file = Path(contracts_dir) / path
+    if not contract_file.exists():
+        typer.echo(f"  Contract not found: {contract_file}")
+        raise typer.Exit(1)
+
+    contract = _yaml.safe_load(contract_file.read_text())
+    parts = Path(path).parts
+    domain = parts[0]
+    contract["_domain"] = domain
+    contract["_contract_path"] = path
+
     config = EngineConfig()
+    tpl = select_template(contract["source_sgdb"], contract["type"])
+    manifest = tpl["manifest"]
+    params = render(contract, manifest, config=config)
+
     deployer = Deployer(config, runtime)
-    success = asyncio.run(deployer._update_params(pg_id, params, auto_start))
+    success = asyncio.run(deployer._update_params(
+        pg_id, params, auto_start, contract=contract, manifest=manifest,
+    ))
     deployer.close()
     if success:
         typer.echo(f"  Parameters updated on {pg_id}")
+        if contract.get("secrets"):
+            typer.echo("  Secrets resolved.")
+        if contract.get("assets"):
+            typer.echo("  Assets resolved.")
         if auto_start:
             typer.echo("  Flow restarted.")
         else:
-            typer.echo("  Flow left stopped. Start manually when ready.")
+            typer.echo("  Flow left stopped.")
     else:
         typer.echo("  Failed: no parameter context found for this process group.")
         raise typer.Exit(1)

@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG (
     contract_paths    ARRAY NOT NULL,
     template_id       STRING,
     template_version  STRING,
-    contract_sha      STRING NOT NULL,
+    contract_sha      STRING,
+    action            STRING NOT NULL DEFAULT 'DEPLOY',
     deployed_at       TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     process_group_id  STRING,
     PRIMARY KEY (id)
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG (
 CREATE OR REPLACE VIEW OPENFLOW_FACTORY.METADATA.LATEST_DEPLOYMENTS AS
 SELECT *
 FROM OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG
+WHERE action = 'DEPLOY'
 QUALIFY ROW_NUMBER() OVER (PARTITION BY runtime_name ORDER BY deployed_at DESC) = 1;
 
 -- ============================================================================

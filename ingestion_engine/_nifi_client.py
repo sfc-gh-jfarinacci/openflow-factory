@@ -501,6 +501,8 @@ class NiFiClient:
         for p in existing_params:
             param_obj = p.get("parameter", {})
             name = param_obj.get("name", "")
+            if param_obj.get("referencedAssets"):
+                continue
             if name in parameters:
                 matched_keys.add(name)
                 updated_params.append({

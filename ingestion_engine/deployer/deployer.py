@@ -481,11 +481,19 @@ class Deployer:
                 return t["bundle"]
         raise DeployError(f"Cannot find bundle for {name_fragment} on runtime")
 
-    async def _update_params(self, pg_id: str, params: dict[str, dict[str, str]], auto_start: bool) -> bool:
+    async def _update_params(
+        self,
+        pg_id: str,
+        params: dict[str, dict[str, str]],
+        auto_start: bool,
+        *,
+        contract: Optional[dict] = None,
+        manifest: Optional[dict] = None,
+    ) -> bool:
         client = await self._flow._get_client()
         try:
             await client.stop_process_group(pg_id)
-            await asyncio.sleep(2)
+            await self._wait_threads_drained(client, pg_id)
             await client.disable_controller_services(pg_id)
             await asyncio.sleep(3)
 
@@ -497,19 +505,69 @@ class Deployer:
             revision = ctx_data.get("revision", {}).get("version", 0)
 
             flat_params = {}
+            skip_params = set()
+            if manifest:
+                for m in manifest.get("param_mapping", []):
+                    if m.get("type") == "asset":
+                        skip_params.add(m["param"])
+            if contract:
+                if contract.get("assets"):
+                    skip_params.update(contract["assets"].keys())
+                if contract.get("secrets"):
+                    skip_params.update(contract["secrets"].keys())
+
             for ctx_name, values in params.items():
                 if isinstance(values, dict):
-                    flat_params.update(values)
+                    for k, v in values.items():
+                        if k not in skip_params:
+                            flat_params[k] = v
 
             await client.update_parameter_context(ctx_id, revision, flat_params)
             await asyncio.sleep(2)
-
-            if auto_start:
-                await self._flow._robust_start(client, pg_id)
-
-            return True
         finally:
             await client.close()
+
+        try:
+            if contract and contract.get("assets"):
+                await self._resolve_assets(
+                    pg_id,
+                    manifest or {},
+                    contract_assets=contract.get("assets"),
+                )
+
+            if contract and contract.get("secrets"):
+                await self._resolve_secrets(pg_id, contract, manifest or {})
+
+            if auto_start:
+                client = await self._flow._get_client()
+                try:
+                    await self._flow._robust_start(client, pg_id)
+                finally:
+                    await client.close()
+        except Exception as e:
+            try:
+                client = await self._flow._get_client()
+                try:
+                    await self._flow._robust_start(client, pg_id)
+                finally:
+                    await client.close()
+            except Exception:
+                pass
+            raise DeployError(f"Update failed (attempted rollback restart): {e}") from e
+
+        self._record_param_update(pg_id)
+        return True
+
+    async def _wait_threads_drained(self, client, pg_id: str, timeout: float = 30.0) -> None:
+        elapsed = 0.0
+        interval = 2.0
+        while elapsed < timeout:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            status = await client.get_process_group_status(pg_id)
+            if status.get("active_thread_count", 0) == 0:
+                return
+        return
 
     async def _replace_flow(self, pg_id: str) -> None:
         client = await self._flow._get_client()
@@ -551,6 +609,7 @@ class Deployer:
                     raise
         finally:
             await client.close()
+        self._record_deletion(pg_id)
 
     async def _resolve_assets(
         self,
@@ -641,7 +700,7 @@ class Deployer:
             row = self._sf.query_one(
                 "SELECT contract_sha, template_id, template_version, process_group_id "
                 "FROM OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG "
-                "WHERE runtime_name = %s ORDER BY deployed_at DESC LIMIT 1",
+                "WHERE runtime_name = %s AND action = 'DEPLOY' ORDER BY deployed_at DESC LIMIT 1",
                 [runtime_name],
             )
             return row
@@ -660,9 +719,35 @@ class Deployer:
         try:
             self._sf.execute(
                 "INSERT INTO OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG "
-                "(runtime_name, contract_paths, template_id, template_version, contract_sha, process_group_id) "
-                "SELECT %s, PARSE_JSON(%s), %s, %s, %s, %s",
+                "(runtime_name, contract_paths, template_id, template_version, contract_sha, action, process_group_id) "
+                "SELECT %s, PARSE_JSON(%s), %s, %s, %s, 'DEPLOY', %s",
                 [runtime_name, json.dumps(contract_paths), template_id, template_version, sha, process_group_id],
+            )
+        except Exception:
+            pass
+
+    def _record_param_update(self, process_group_id: str, contract_path: Optional[str] = None):
+        try:
+            self._sf.execute(
+                "INSERT INTO OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG "
+                "(runtime_name, contract_paths, template_id, template_version, contract_sha, action, process_group_id) "
+                "SELECT runtime_name, contract_paths, template_id, template_version, NULL, 'PARAM_UPDATE', %s "
+                "FROM OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG "
+                "WHERE process_group_id = %s AND action = 'DEPLOY' ORDER BY deployed_at DESC LIMIT 1",
+                [process_group_id, process_group_id],
+            )
+        except Exception:
+            pass
+
+    def _record_deletion(self, process_group_id: str):
+        try:
+            self._sf.execute(
+                "INSERT INTO OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG "
+                "(runtime_name, contract_paths, template_id, template_version, contract_sha, action, process_group_id) "
+                "SELECT runtime_name, contract_paths, template_id, template_version, NULL, 'DELETED', %s "
+                "FROM OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG "
+                "WHERE process_group_id = %s AND action = 'DEPLOY' ORDER BY deployed_at DESC LIMIT 1",
+                [process_group_id, process_group_id],
             )
         except Exception:
             pass

@@ -189,6 +189,12 @@ class Flow:
                     bulletins=errors,
                 )
 
+            if pg.disabled_count and pg.disabled_count > 0:
+                processors = nipyapi.canvas.list_all_processors(pg_id)
+                for proc in processors:
+                    if proc.component.state == "DISABLED":
+                        nipyapi.canvas.schedule_processor(proc, "STOPPED")
+
             result = nipyapi.canvas.schedule_process_group(pg_id, True)
             if not result:
                 pg = nipyapi.canvas.get_process_group(pg_id, "id")

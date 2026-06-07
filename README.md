@@ -150,50 +150,26 @@ ingestion-engine deploy-contract fraud/ecommerce/postgres_full.yaml \
 
 ### 3. Update parameters for existing deployment
 
-Parameter updates do NOT require a full redeployment. The engine stops the flow in place, updates parameters, and restarts:
+Parameter updates do NOT require a full redeployment. The engine re-renders params from the contract, stops the flow in place, updates parameters, resolves secrets/assets, and restarts:
 
-```python
-import asyncio
-from ingestion_engine import EngineConfig, Deployer
+```bash
+# Update params from contract (stops flow, updates, resolves secrets/assets, restarts)
+ingestion-engine update-params <process_group_id> \
+  fraud/ecommerce/postgres_full.yaml -r test --start
 
-config = EngineConfig()
-deployer = Deployer(config, "test")
-
-# Update params on an already-deployed flow (no template re-import)
-asyncio.run(deployer._update_params(
-    pg_id="<process_group_id>",
-    params={"context_name": {"Postgres Host": "new-host.example.com", "Postgres Port": "5433"}},
-    auto_start=True,
-))
-deployer.close()
+# Update without restarting (leaves flow stopped)
+ingestion-engine update-params <process_group_id> \
+  fraud/ecommerce/postgres_full.yaml -r test --no-start
 ```
 
 **What happens:**
-1. Processors stopped
-2. Controllers disabled (NiFi requires this before param edits)
-3. Parameter context values updated via API
-4. `auto_start=True`: Controllers re-enabled (with wait), processors restarted (with verification)
-
-```bash
-# Update params from a JSON file (stops flow, updates, restarts)
-ingestion-engine update-params <process_group_id> -r test \
-  --params params.json --start
-
-# Update without restarting (leaves flow stopped)
-ingestion-engine update-params <process_group_id> -r test \
-  --params params.json --no-start
-```
-
-The params JSON file format mirrors the parameter context structure:
-
-```json
-{
-  "context_name": {
-    "Postgres Host": "new-host.example.com",
-    "Postgres Port": "5433"
-  }
-}
-```
+1. Params re-rendered from contract via manifest mapping
+2. Processors stopped
+3. Controllers disabled (NiFi requires this before param edits)
+4. Parameter context values updated via API
+5. Assets resolved (upload/link if contract has `assets:`)
+6. Secrets resolved (fetch/apply/remap if contract has `secrets:`)
+7. `--start`: Controllers re-enabled (with wait), processors restarted (with verification)
 
 ### 4. Delete a deployment
 
