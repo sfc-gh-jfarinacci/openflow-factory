@@ -1,0 +1,24 @@
+version: v1
+source_sgdb: sqlserver
+type: full
+cron: "0 */5 * * * ?"
+
+secrets:
+  Sqlserver Password: OPENFLOW_FACTORY.SECRETS.ECOMMERCE_PASSWORD
+
+assets:
+  Sqlserver Driver: mssql-jdbc-13.4.0.jre11.jar
+
+source_config:
+  host: jfarinacci-rds-nlb-fc9c0cf73731f031.elb.us-west-2.amazonaws.com
+  port: 1433
+  database: ecommerce
+  schema: dbo
+  username: admin
+  tables:
+    - name: cliente
+      pii_columns: [cpf, email, nome, sobrenome]
+    - name: endereco
+      pii_columns: [rua, bairro, numero]
+    - name: pedido
+      pii_columns: []

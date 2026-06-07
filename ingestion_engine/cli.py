@@ -112,6 +112,63 @@ def run(
 
 
 @app.command()
+def update_params(
+    pg_id: str = typer.Argument(..., help="Process group ID of the deployed flow"),
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+    params_file: str = typer.Option(
+        ..., "--params", "-p", help="JSON file with param values ({context_name: {key: value}})"
+    ),
+    auto_start: bool = typer.Option(True, "--start/--no-start", help="Restart flow after updating (default: yes)"),
+):
+    """Update parameters on a running flow without redeployment.
+
+    Stops the flow, updates parameter context values, then restarts.
+    """
+    import json
+
+    params = json.loads(Path(params_file).read_text())
+    config = EngineConfig()
+    deployer = Deployer(config, runtime)
+    success = asyncio.run(deployer._update_params(pg_id, params, auto_start))
+    deployer.close()
+    if success:
+        typer.echo(f"  Parameters updated on {pg_id}")
+        if auto_start:
+            typer.echo("  Flow restarted.")
+        else:
+            typer.echo("  Flow left stopped. Start manually when ready.")
+    else:
+        typer.echo("  Failed: no parameter context found for this process group.")
+        raise typer.Exit(1)
+
+
+@app.command()
+def delete_flow(
+    pg_id: str = typer.Argument(..., help="Process group ID to delete"),
+    runtime: str = typer.Option(..., "--runtime", "-r"),
+    confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+):
+    """Delete a deployed flow from the runtime.
+
+    Stops processors, drains queues, disables controllers, deletes the process
+    group, and cleans up orphaned parameter contexts.
+    """
+    config = EngineConfig()
+    deployer = Deployer(config, runtime)
+
+    if not confirm:
+        health = asyncio.run(deployer.healthcheck(pg_id))
+        typer.echo(f"  Flow: {pg_id}")
+        typer.echo(f"  State: {health.get('state', 'unknown')} (running={health.get('running_count', 0)})")
+        if not typer.confirm("  Delete this flow? This cannot be undone."):
+            raise typer.Abort()
+
+    asyncio.run(deployer._replace_flow(pg_id))
+    deployer.close()
+    typer.echo(f"  Deleted: {pg_id}")
+
+
+@app.command()
 def deploy_contract(
     path: str = typer.Argument(..., help="Contract path relative to contracts dir (e.g. fraud/ecommerce/postgres_full.yaml)"),
     sha: str = typer.Option(..., "--sha", "-s", help="Git commit SHA of the contracts repo"),
@@ -685,6 +742,144 @@ def apply_params(
 
     asyncio.run(_run())
     flow.close()
+
+
+@app.command()
+def create_network_rule(
+    name: str = typer.Argument(..., help="Rule name (e.g. postgres_private_network_rule)"),
+    values: list[str] = typer.Option(..., "--value", "-v", help="host:port values (repeatable)"),
+    rule_type: str = typer.Option("PRIVATE_HOST_PORT", "--type", "-t"),
+    mode: str = typer.Option("EGRESS", "--mode"),
+):
+    """Create a network rule in OPENFLOW_FACTORY.RULES."""
+    from ingestion_engine.access import Access
+
+    config = EngineConfig()
+    access = Access(config)
+    info = access.create_network_rule(name, values, mode=mode, rule_type=rule_type)
+    access.close()
+    typer.echo(f"  Created: {info.fqn}")
+    for v in info.values:
+        typer.echo(f"    {v}")
+
+
+@app.command()
+def alter_network_rule(
+    name: str = typer.Argument(..., help="Rule name"),
+    add: list[str] = typer.Option(None, "--add", "-a", help="host:port values to add"),
+    remove: list[str] = typer.Option(None, "--remove", "-r", help="host:port values to remove"),
+):
+    """Add or remove values from a network rule."""
+    from ingestion_engine.access import Access
+
+    config = EngineConfig()
+    access = Access(config)
+    if add:
+        info = access.alter_network_rule_add(name, add)
+        typer.echo(f"  Added to {info.fqn}: {add}")
+    if remove:
+        info = access.alter_network_rule_remove(name, remove)
+        typer.echo(f"  Removed from {info.fqn}: {remove}")
+    if not add and not remove:
+        typer.echo("  Specify --add or --remove")
+    access.close()
+
+
+@app.command()
+def delete_network_rule(
+    name: str = typer.Argument(..., help="Rule name"),
+):
+    """Delete a network rule. Automatically removes it from any EAI referencing it."""
+    from ingestion_engine.access import Access
+
+    config = EngineConfig()
+    access = Access(config)
+    access.delete_network_rule(name)
+    access.close()
+    typer.echo(f"  Deleted: {name}")
+
+
+@app.command()
+def create_eai(
+    name: str = typer.Argument(..., help="EAI name (e.g. OPENFLOW_PRIVATE_EAI)"),
+    rules: list[str] = typer.Option(..., "--rule", "-r", help="Network rule names (repeatable)"),
+):
+    """Create an External Access Integration with the specified network rules."""
+    from ingestion_engine.access import Access
+
+    config = EngineConfig()
+    access = Access(config)
+    info = access.create_eai(name, rules)
+    access.close()
+    typer.echo(f"  Created: {info.name}")
+    for r in info.network_rules:
+        typer.echo(f"    {r}")
+
+
+@app.command()
+def alter_eai(
+    name: str = typer.Argument(..., help="EAI name"),
+    add_rules: list[str] = typer.Option(None, "--add-rule", "-a", help="Rules to add"),
+    remove_rules: list[str] = typer.Option(None, "--remove-rule", "-r", help="Rules to remove (rule is NOT deleted)"),
+):
+    """Add or remove network rules from an EAI. Removing a rule does NOT delete the rule itself."""
+    from ingestion_engine.access import Access
+
+    config = EngineConfig()
+    access = Access(config)
+    if add_rules:
+        info = access.alter_eai_add_rules(name, add_rules)
+        typer.echo(f"  Added rules to {name}: {add_rules}")
+    if remove_rules:
+        info = access.alter_eai_remove_rules(name, remove_rules)
+        typer.echo(f"  Removed rules from {name}: {remove_rules}")
+    if not add_rules and not remove_rules:
+        typer.echo("  Specify --add-rule or --remove-rule")
+    access.close()
+
+
+@app.command()
+def delete_eai(
+    name: str = typer.Argument(..., help="EAI name"),
+):
+    """Delete an External Access Integration."""
+    from ingestion_engine.access import Access
+
+    config = EngineConfig()
+    access = Access(config)
+    access.delete_eai(name)
+    access.close()
+    typer.echo(f"  Deleted: {name}")
+
+
+@app.command()
+def list_access(
+    runtime: Optional[str] = typer.Option(None, "--runtime", "-r", help="Show EAI attached to this runtime"),
+):
+    """List network rules and EAIs."""
+    from ingestion_engine.access import Access
+
+    config = EngineConfig()
+    access = Access(config)
+
+    typer.echo("Network Rules:")
+    rules = access.list_network_rules()
+    if not rules:
+        typer.echo("  (none)")
+    for r in rules:
+        typer.echo(f"  {r.fqn:50s} {r.mode} {r.rule_type}")
+
+    typer.echo("\nExternal Access Integrations:")
+    eais = access.list_eais()
+    if not eais:
+        typer.echo("  (none)")
+    for e in eais:
+        status = "enabled" if e.enabled else "disabled"
+        typer.echo(f"  {e.name:40s} [{status}]")
+        for rule in e.network_rules:
+            typer.echo(f"    {rule}")
+
+    access.close()
 
 
 if __name__ == "__main__":

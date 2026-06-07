@@ -1,5 +1,8 @@
 USE ROLE ACCOUNTADMIN;
 
+
+
+
 -- 1. Role
 CREATE ROLE IF NOT EXISTS OPENFLOW_ADMIN
   COMMENT = 'Openflow DAG Factory admin role — manages flows, connectors, secrets, runtimes';
@@ -14,9 +17,13 @@ CREATE WAREHOUSE IF NOT EXISTS OPENFLOW_FACTORY_WH
   COMMENT = 'Warehouse used by the openflow-dag-factory backend';
 
 
+-- ============================================================================
+-- Database + schemas
+-- Create OPENFLOW database, and schemas need to enables pipeline
+-- ============================================================================
+
 GRANT USAGE, OPERATE ON WAREHOUSE OPENFLOW_FACTORY_WH TO ROLE OPENFLOW_ADMIN;
 
--- 3. Database + schemas
 CREATE DATABASE IF NOT EXISTS OPENFLOW_FACTORY
   COMMENT = 'Metadata, secrets, and audit log for openflow-dag-factory';
 
@@ -26,17 +33,30 @@ GRANT CREATE SCHEMA ON DATABASE OPENFLOW_FACTORY TO ROLE OPENFLOW_ADMIN;
 
 CREATE SCHEMA IF NOT EXISTS OPENFLOW_FACTORY.METADATA;
 CREATE SCHEMA IF NOT EXISTS OPENFLOW_FACTORY.SECRETS;
+CREATE SCHEMA IF NOT EXISTS OPENFLOW_FACTORY.RULES;
 
 GRANT USAGE, MODIFY, MONITOR,
     CREATE TABLE, CREATE VIEW, CREATE STAGE,
     CREATE FUNCTION, CREATE PROCEDURE, CREATE TASK
     ON SCHEMA OPENFLOW_FACTORY.METADATA TO ROLE OPENFLOW_ADMIN;
 
-GRANT USAGE, MODIFY, MONITOR,
-      CREATE SECRET, CREATE NETWORK RULE
-      ON SCHEMA OPENFLOW_FACTORY.SECRETS TO ROLE OPENFLOW_ADMIN;
 
--- 4. Account-level grants (Openflow runtime + EAI management)
+
+GRANT USAGE, MODIFY, MONITOR,
+      CREATE SECRET
+      ON SCHEMA OPENFLOW_FACTORY.SECRETS TO ROLE OPENFLOW_ADMIN;
+GRANT USAGE, CREATE NETWORK RULE
+    ON SCHEMA OPENFLOW_FACTORY.RULES TO ROLE OPENFLOW_ADMIN;
+
+
+
+-- ============================================================================
+-- Account-level grants (Openflow runtime + EAI management)
+-- Assign account level priveleges to create EAIs, tasks Openflow instance
+-- ============================================================================
+
+GRANT CREATE OPENFLOW DATA PLANE INTEGRATION ON ACCOUNT TO ROLE OPENFLOW_ADMIN;
+GRANT CREATE OPENFLOW RUNTIME INTEGRATION ON ACCOUNT TO ROLE OPENFLOW_ADMIN;
 GRANT CREATE DATABASE ON ACCOUNT TO ROLE OPENFLOW_ADMIN;
 GRANT CREATE INTEGRATION   ON ACCOUNT TO ROLE OPENFLOW_ADMIN;
 GRANT CREATE NETWORK POLICY ON ACCOUNT TO ROLE OPENFLOW_ADMIN;
@@ -47,16 +67,9 @@ GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO ROLE OPENFLOW_ADMIN;
 
 
 
--- 5. Service user (replace the public key)
-CREATE USER IF NOT EXISTS OPENFLOW_FACTORY_SVC
-  TYPE = SERVICE
-  RSA_PUBLIC_KEY = '<YOUR-RSA-KEY>'
-  DEFAULT_ROLE = OPENFLOW_ADMIN
-  DEFAULT_WAREHOUSE = OPENFLOW_FACTORY_WH
-  DEFAULT_NAMESPACE = OPENFLOW_FACTORY.METADATA
-  COMMENT = 'Backend service account for openflow-dag-factory';
 
-GRANT ROLE OPENFLOW_ADMIN TO USER OPENFLOW_FACTORY_SVC;
+
+
 GRANT ROLE OPENFLOW_ADMIN TO USER IDENTIFIER(CURRENT_USER());
 
 
@@ -66,6 +79,7 @@ GRANT ROLE OPENFLOW_ADMIN TO USER IDENTIFIER(CURRENT_USER());
 -- Tracks what was deployed, enabling idempotency (same sha = no-op).
 -- ============================================================================
 
+USE ROLE OPENFLOW_ADMIN;
 
 CREATE TABLE IF NOT EXISTS OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG (
     id                STRING NOT NULL DEFAULT UUID_STRING(),
@@ -83,3 +97,19 @@ CREATE OR REPLACE VIEW OPENFLOW_FACTORY.METADATA.LATEST_DEPLOYMENTS AS
 SELECT *
 FROM OPENFLOW_FACTORY.METADATA.DEPLOYMENT_LOG
 QUALIFY ROW_NUMBER() OVER (PARTITION BY runtime_name ORDER BY deployed_at DESC) = 1;
+
+-- ============================================================================
+-- Create Service user (replace the public key)
+-- https://docs.snowflake.com/en/user-guide/key-pair-auth
+-- https://community.snowflake.com/s/article/How-To-Generate-Key-Pair-using-ssh-keygen-command-on-Windows
+-- ============================================================================
+
+CREATE USER IF NOT EXISTS OPENFLOW_FACTORY_SVC
+  TYPE = SERVICE
+  RSA_PUBLIC_KEY = '<YOUR-RSA-KEY>'
+  DEFAULT_ROLE = OPENFLOW_ADMIN
+  DEFAULT_WAREHOUSE = OPENFLOW_FACTORY_WH
+  DEFAULT_NAMESPACE = OPENFLOW_FACTORY.METADATA
+  COMMENT = 'Backend service account for openflow-dag-factory';
+
+  GRANT ROLE OPENFLOW_ADMIN TO USER OPENFLOW_FACTORY_SVC;

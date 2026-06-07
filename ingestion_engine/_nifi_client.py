@@ -75,19 +75,57 @@ class NiFiClient:
         ]
 
     async def get_process_group_status(self, pg_id: str) -> dict:
-        data = await self._get(f"flow/process-groups/{pg_id}/status")
-        snap = data.get("processGroupStatus", {}).get("aggregateSnapshot", {})
+        data = await self._get(f"process-groups/{pg_id}")
         return {
             "id": pg_id,
-            "name": snap.get("name"),
-            "running_count": snap.get("runningCount", 0),
-            "stopped_count": snap.get("stoppedCount", 0),
-            "invalid_count": snap.get("invalidCount", 0),
-            "active_thread_count": snap.get("activeThreadCount", 0),
-            "queued_count": snap.get("flowFilesQueued", 0),
-            "bytes_in": snap.get("bytesIn", 0),
-            "bytes_out": snap.get("bytesOut", 0),
+            "name": data.get("component", {}).get("name"),
+            "running_count": data.get("runningCount", 0),
+            "stopped_count": data.get("stoppedCount", 0),
+            "invalid_count": data.get("invalidCount", 0),
+            "disabled_count": data.get("disabledCount", 0),
+            "active_thread_count": data.get("status", {}).get("aggregateSnapshot", {}).get("activeThreadCount", 0),
+            "queued_count": data.get("status", {}).get("aggregateSnapshot", {}).get("flowFilesQueued", 0),
         }
+
+    async def get_controller_services_status(self, pg_id: str) -> list[dict]:
+        data = await self._get(
+            f"flow/process-groups/{pg_id}/controller-services?includeAncestorGroups=false&includeDescendantGroups=true"
+        )
+        svcs = data.get("controllerServices", [])
+        return [
+            {
+                "id": s.get("id"),
+                "name": s.get("component", {}).get("name"),
+                "state": s.get("component", {}).get("state"),
+                "validation_status": s.get("component", {}).get("validationStatus"),
+                "validation_errors": s.get("component", {}).get("validationErrors", []),
+            }
+            for s in svcs
+        ]
+
+    async def get_bulletins(self, pg_id: str) -> list[dict]:
+        data = await self._get(f"flow/process-groups/{pg_id}?uiOnly=true")
+        pgs = data.get("processGroupFlow", {}).get("flow", {}).get("processGroups", [])
+        bulletins = []
+        for pg in pgs:
+            for b in pg.get("bulletins", []):
+                bulletin = b.get("bulletin", {})
+                bulletins.append({
+                    "level": bulletin.get("level", ""),
+                    "message": bulletin.get("message", ""),
+                    "source_name": bulletin.get("sourceName", ""),
+                    "timestamp": bulletin.get("timestamp", ""),
+                })
+        root_bulletins = data.get("processGroupFlow", {}).get("flow", {}).get("bulletins", [])
+        for b in root_bulletins:
+            bulletin = b.get("bulletin", {})
+            bulletins.append({
+                "level": bulletin.get("level", ""),
+                "message": bulletin.get("message", ""),
+                "source_name": bulletin.get("sourceName", ""),
+                "timestamp": bulletin.get("timestamp", ""),
+            })
+        return bulletins
 
     async def start_process_group(self, pg_id: str) -> None:
         await self._put(f"flow/process-groups/{pg_id}", {"id": pg_id, "state": "RUNNING"})

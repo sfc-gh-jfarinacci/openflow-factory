@@ -63,15 +63,32 @@ def _enrich_contract(contract: dict, config: Optional[EngineConfig]) -> dict:
     schema = source_config.get("schema", "")
     database = source_config.get("database", "")
 
-    enriched["_tables_json"] = json.dumps([
-        {
+    enriched_tables = []
+    for t in tables:
+        has_partition = bool(t.get("partition_column"))
+        has_watermark = bool(t.get("watermark_columns"))
+        chunk = t.get("chunk_rows", 5000)
+        if not has_partition and not has_watermark:
+            chunk = 0
+        enriched_tables.append({
             "database": database,
             "schema": t.get("schema", schema),
             "table_name": t["name"],
             "pii_columns": t.get("pii_columns", []),
-        }
-        for t in tables
-    ], indent=2)
+            "partition_column": t.get("partition_column"),
+            "watermark_columns": t.get("watermark_columns"),
+            "chunk_rows": chunk,
+            "where_clause": t.get("where_clause"),
+            "exclude_columns": t.get("exclude_columns", []),
+        })
+
+    enriched["_tables_json"] = json.dumps(enriched_tables, indent=2)
+
+    global_chunk = source_config.get("chunk_rows", 5000)
+    has_any_partition = any(t.get("partition_column") or t.get("watermark_columns") for t in tables)
+    if not has_any_partition:
+        global_chunk = 0
+    enriched["chunk_rows"] = str(global_chunk)
 
     if config:
         enriched["config.snowflake_warehouse"] = config.snowflake_warehouse
@@ -98,5 +115,7 @@ def derive_target_fqn(domain: str, source_sgdb: str, source_schema: str, source_
     return f"{domain.upper()}.BRONZE.{source_sgdb.upper()}_{source_schema.upper()}_{source_table.upper()}"
 
 
-def derive_runtime_name(domain: str, filename_stem: str) -> str:
-    return f"{domain}{filename_stem}".replace("_", "").lower()
+def derive_runtime_name(domain: str, filename_stem: str, *, subdomain: Optional[str] = None) -> str:
+    if subdomain:
+        return f"{domain}_{subdomain}_{filename_stem}"
+    return f"{domain}_{filename_stem}"

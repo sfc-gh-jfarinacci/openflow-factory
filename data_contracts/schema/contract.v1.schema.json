@@ -12,55 +12,196 @@
     "cron": { "type": "string", "description": "NiFi Quartz cron expression (6 fields: sec min hour day month weekday)" },
     "secrets": {
       "type": "object",
-      "description": "Maps NiFi sensitive parameter names to Snowflake secret FQNs (OPENFLOW_FACTORY.SECRETS.<NAME>). At deploy time, the parameter value is set to reference the secret, which is resolved at runtime inside SPCS.",
+      "description": "Maps NiFi sensitive parameter names to Snowflake secret FQNs.",
       "additionalProperties": {
         "type": "string",
-        "description": "Fully qualified Snowflake secret name (e.g. OPENFLOW_FACTORY.SECRETS.MY_SECRET)",
         "pattern": "^[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z_][A-Za-z0-9_]*$"
       }
     },
     "assets": {
       "type": "object",
-      "description": "Maps NiFi asset parameter names to file names. Files are resolved from the ingestion_engine/assets directory and uploaded to the flow's parameter context at deploy time.",
-      "additionalProperties": {
-        "type": "string",
-        "description": "Asset file name (e.g. postgresql-42.7.11.jar)"
+      "description": "Maps NiFi asset parameter names to file names in ingestion_engine/assets/.",
+      "additionalProperties": { "type": "string" }
+    },
+    "source_config": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "enum": ["full", "incremental"] } } },
+      "then": { "required": ["cron"] }
+    },
+    {
+      "if": { "properties": { "source_sgdb": { "enum": ["postgres", "mysql", "sqlserver"] } } },
+      "then": {
+        "properties": {
+          "source_config": {
+            "$ref": "#/$defs/relational_source_config"
+          }
+        }
       }
     },
-    "source_config": {
-      "type": "object",
-      "required": ["host", "port", "database", "schema", "tables"],
-      "properties": {
-        "host": { "type": "string", "minLength": 1 },
-        "port": { "type": "integer", "default": 5432 },
-        "database": { "type": "string", "minLength": 1 },
-        "schema": { "type": "string", "minLength": 1 },
-        "username": { "type": "string", "minLength": 1 },
-        "tables": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "required": ["name", "pii_columns"],
+    {
+      "if": { "properties": { "source_sgdb": { "const": "postgres" } } },
+      "then": {
+        "properties": {
+          "source_config": {
             "properties": {
-              "name": { "type": "string", "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$" },
-              "pii_columns": { "type": "array", "items": { "type": "string" } },
-              "schema": { "type": "string" },
-              "partition_column": { "type": "string" },
-              "chunk_rows": { "type": "integer", "minimum": 1000 },
-              "has_primary_key": { "type": "boolean" },
-              "pre_sql": { "type": "string" },
-              "post_sql": { "type": "string" }
+              "port": { "default": 5432 },
+              "replication_slot": { "type": "string", "description": "Required for CDC. Logical replication slot name." },
+              "publication": { "type": "string", "description": "Required for CDC. Publication name." }
             }
           }
         }
       }
+    },
+    {
+      "if": { "properties": { "source_sgdb": { "const": "sqlserver" } } },
+      "then": {
+        "properties": {
+          "source_config": {
+            "properties": {
+              "port": { "default": 1433 },
+              "instance": { "type": "string", "description": "Named instance (optional)." },
+              "encrypt": { "type": "boolean", "default": true, "description": "Whether to use encrypted connection." },
+              "trust_server_certificate": { "type": "boolean", "default": true, "description": "Trust self-signed certs." }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "source_sgdb": { "const": "mysql" } } },
+      "then": {
+        "properties": {
+          "source_config": {
+            "properties": {
+              "port": { "default": 3306 },
+              "server_id": { "type": "integer", "description": "Required for CDC. Unique server ID for binlog replication." }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "source_sgdb": { "const": "mongodb" } } },
+      "then": {
+        "properties": {
+          "source_config": {
+            "$ref": "#/$defs/mongodb_source_config"
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "source_sgdb": { "const": "kafka" } } },
+      "then": {
+        "properties": {
+          "source_config": {
+            "$ref": "#/$defs/kafka_source_config"
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "source_sgdb": { "const": "s3" } } },
+      "then": {
+        "properties": {
+          "source_config": {
+            "$ref": "#/$defs/s3_source_config"
+          }
+        }
+      }
     }
-  },
-  "if": {
-    "properties": { "type": { "enum": ["full", "incremental"] } }
-  },
-  "then": {
-    "required": ["cron"]
+  ],
+  "$defs": {
+    "table_def": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$" },
+        "pii_columns": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "schema": { "type": "string", "description": "Override schema for this table." },
+        "partition_column": { "type": "string", "description": "Column for chunked/parallel reads. If unset, chunk_rows is forced to 0 (single fetch)." },
+        "watermark_columns": { "type": "string", "description": "Comma-separated list of columns for incremental high-watermark tracking (e.g. 'updated_at,id'). Used by incremental/CDC strategies." },
+        "chunk_rows": { "type": "integer", "minimum": 0, "default": 5000, "description": "Rows per chunk. Defaults to 5000 if partition_column is set, otherwise 0." },
+        "has_primary_key": { "type": "boolean" },
+        "pre_sql": { "type": "string", "description": "SQL to run before fetching this table." },
+        "post_sql": { "type": "string", "description": "SQL to run after fetching this table." },
+        "exclude_columns": { "type": "array", "items": { "type": "string" }, "description": "Columns to exclude from ingestion." },
+        "where_clause": { "type": "string", "description": "Filter predicate for this table." }
+      }
+    },
+    "relational_source_config": {
+      "type": "object",
+      "required": ["host", "database", "tables"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer" },
+        "database": { "type": "string", "minLength": 1 },
+        "schema": { "type": "string", "default": "dbo" },
+        "username": { "type": "string" },
+        "tables": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/table_def" }
+        },
+        "connection_properties": {
+          "type": "object",
+          "description": "Additional JDBC connection properties passed as key=value.",
+          "additionalProperties": { "type": "string" }
+        },
+        "fetch_size": { "type": "integer", "default": 10000, "description": "JDBC fetch size." },
+        "query_timeout": { "type": "integer", "description": "Query timeout in seconds." }
+      }
+    },
+    "mongodb_source_config": {
+      "type": "object",
+      "required": ["connection_string", "database", "collections"],
+      "properties": {
+        "connection_string": { "type": "string", "description": "MongoDB connection URI." },
+        "database": { "type": "string" },
+        "collections": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "pii_fields": { "type": "array", "items": { "type": "string" }, "default": [] }
+            }
+          }
+        }
+      }
+    },
+    "kafka_source_config": {
+      "type": "object",
+      "required": ["brokers", "topics"],
+      "properties": {
+        "brokers": { "type": "string", "description": "Comma-separated broker list." },
+        "topics": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "consumer_group": { "type": "string", "description": "Consumer group ID. Defaults to flow name." },
+        "offset_reset": { "type": "string", "enum": ["earliest", "latest"], "default": "earliest" },
+        "schema_registry_url": { "type": "string", "description": "Confluent Schema Registry URL (if using Avro/Protobuf)." },
+        "key_deserializer": { "type": "string", "enum": ["string", "avro", "json"], "default": "string" },
+        "value_deserializer": { "type": "string", "enum": ["string", "avro", "json"], "default": "json" }
+      }
+    },
+    "s3_source_config": {
+      "type": "object",
+      "required": ["bucket"],
+      "properties": {
+        "bucket": { "type": "string" },
+        "prefix": { "type": "string", "default": "" },
+        "region": { "type": "string", "default": "us-west-2" },
+        "file_format": { "type": "string", "enum": ["json", "csv", "parquet", "avro"], "default": "json" },
+        "compression": { "type": "string", "enum": ["none", "gzip", "snappy", "zstd"], "default": "none" },
+        "sqs_queue_url": { "type": "string", "description": "SQS queue for event-driven ingestion (optional)." }
+      }
+    }
   }
 }

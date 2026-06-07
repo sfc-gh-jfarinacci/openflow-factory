@@ -8,7 +8,7 @@ from typing import Optional
 
 from ingestion_engine._nifi_client import NiFiClient
 from ingestion_engine.config import EngineConfig
-from ingestion_engine.exceptions import DeployError, TemplateNotFoundError
+from ingestion_engine.exceptions import DeployError, StartError, TemplateNotFoundError
 from ingestion_engine.runtime.runtime import Runtime
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
@@ -97,13 +97,7 @@ class Flow:
 
             started = False
             if auto_start:
-                try:
-                    await client.enable_controller_services(pg_id)
-                    await asyncio.sleep(1.5)
-                    await client.start_process_group(pg_id)
-                    started = True
-                except Exception:
-                    pass
+                started = await self._robust_start(client, pg_id)
 
             return FlowDeployResult(
                 process_group_id=pg_id,
@@ -152,6 +146,67 @@ class Flow:
             )
         finally:
             await client.close()
+
+    async def _robust_start(
+        self,
+        client: NiFiClient,
+        pg_id: str,
+        *,
+        enable_retries: int = 3,
+    ) -> bool:
+        import nipyapi
+
+        profile_name = self._runtime_name
+
+        def _do_start():
+            nipyapi.profiles.switch(profile_name)
+
+            for attempt in range(1, enable_retries + 1):
+                try:
+                    nipyapi.canvas.schedule_all_controllers(pg_id, True)
+                    break
+                except Exception as e:
+                    if attempt == enable_retries:
+                        raise StartError(
+                            f"Failed to enable controllers after {enable_retries} attempts: {e}"
+                        )
+                    try:
+                        nipyapi.canvas.schedule_all_controllers(pg_id, False)
+                    except Exception:
+                        pass
+
+            pg = nipyapi.canvas.get_process_group(pg_id, "id")
+            bulletins = pg.bulletins or []
+            errors = [
+                {"level": "ERROR", "source_name": b.bulletin.source_name, "message": b.bulletin.message}
+                for b in bulletins
+                if b.bulletin and b.bulletin.level == "ERROR"
+            ]
+            if errors:
+                raise StartError(
+                    f"Bulletin errors after enabling controllers: "
+                    f"{errors[0]['source_name']}: {errors[0]['message']}",
+                    bulletins=errors,
+                )
+
+            result = nipyapi.canvas.schedule_process_group(pg_id, True)
+            if not result:
+                pg = nipyapi.canvas.get_process_group(pg_id, "id")
+                raise StartError(
+                    f"Processors did not reach RUNNING state. "
+                    f"running={pg.running_count}, stopped={pg.stopped_count}, "
+                    f"invalid={pg.invalid_count}, disabled={pg.disabled_count}",
+                    status={
+                        "running_count": pg.running_count,
+                        "stopped_count": pg.stopped_count,
+                        "invalid_count": pg.invalid_count,
+                        "disabled_count": pg.disabled_count,
+                    },
+                )
+
+            return True
+
+        return await asyncio.to_thread(_do_start)
 
     def _load_template_spec(self, template: str) -> dict:
         from ingestion_engine.templates.loader import load_template as _load

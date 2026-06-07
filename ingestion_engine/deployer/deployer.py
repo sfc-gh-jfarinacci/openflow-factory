@@ -173,11 +173,13 @@ class Deployer:
         contract = yaml.safe_load(contract_file.read_text())
         parts = Path(contract_path).parts
         domain = parts[0]
+        subdomain = parts[1] if len(parts) > 2 else None
         filename_stem = contract_file.stem
 
-        runtime_name = runtime_name_override or derive_runtime_name(domain, filename_stem)
-        self._runtime_name = runtime_name
-        self._flow = Flow(self._config, runtime_name)
+        flow_name = derive_runtime_name(domain, filename_stem, subdomain=subdomain)
+        runtime_target = runtime_name_override or flow_name
+        self._runtime_name = runtime_target
+        self._flow = Flow(self._config, runtime_target)
 
         contract["_domain"] = domain
         contract["_contract_path"] = contract_path
@@ -187,13 +189,13 @@ class Deployer:
 
         params = render(contract, manifest, config=self._config)
 
-        prev = self._get_last_deployment(runtime_name)
+        prev = self._get_last_deployment(flow_name)
 
         if not force and prev and prev.get("CONTRACT_SHA") == sha:
             return DeployResult(
                 flow=FlowDeployResult(
                     process_group_id=prev.get("PROCESS_GROUP_ID", ""),
-                    process_group_name=runtime_name,
+                    process_group_name=flow_name,
                     import_method="skipped",
                     strategy=contract.get("type", "full"),
                 ),
@@ -205,11 +207,13 @@ class Deployer:
 
         flow_result = await self._flow.deploy_from_template(
             template=tpl["template_id"],
-            name=runtime_name,
+            name=flow_name,
             params=params,
             connector_id=connector_id,
             auto_start=False,
         )
+
+        await self._apply_rendered_params(flow_result.process_group_id, params)
 
         await self._resolve_assets(
             flow_result.process_group_id,
@@ -227,15 +231,13 @@ class Deployer:
         if auto_start:
             client = await self._flow._get_client()
             try:
-                await client.enable_controller_services(flow_result.process_group_id)
-                await asyncio.sleep(1.5)
-                await client.start_process_group(flow_result.process_group_id)
+                await self._flow._robust_start(client, flow_result.process_group_id)
                 flow_result.started = True
             finally:
                 await client.close()
 
         self._record_deployment(
-            runtime_name=runtime_name,
+            runtime_name=flow_name,
             contract_paths=[contract_path],
             template_id=tpl["template_id"],
             template_version=tpl["version"],
@@ -244,6 +246,58 @@ class Deployer:
         )
 
         return DeployResult(flow=flow_result)
+
+    async def _apply_rendered_params(self, pg_id: str, params: dict[str, dict[str, str]]) -> None:
+        client = await self._flow._get_client()
+        try:
+            ctx_data = await client.get_parameter_context_by_pg(pg_id)
+            if not ctx_data:
+                return
+            ctx_id = ctx_data.get("component", {}).get("id") or ctx_data.get("id")
+            revision = ctx_data.get("revision", {}).get("version", 0)
+            inherited = ctx_data.get("component", {}).get("inheritedParameterContexts", [])
+
+            flat_params = {}
+            for ctx_name, values in params.items():
+                if isinstance(values, dict):
+                    flat_params.update(values)
+
+            if not flat_params:
+                return
+
+            existing_params = ctx_data.get("component", {}).get("parameters", [])
+            updated = []
+            for p in existing_params:
+                param = p.get("parameter", {})
+                name = param.get("name", "")
+                has_asset = bool(param.get("referencedAssets"))
+                if has_asset:
+                    continue
+                if name in flat_params:
+                    updated.append({
+                        "parameter": {
+                            "name": name,
+                            "value": flat_params[name],
+                            "sensitive": param.get("sensitive", False),
+                        }
+                    })
+                else:
+                    updated.append(p)
+
+            try:
+                await client._put(f"parameter-contexts/{ctx_id}", {
+                    "revision": {"version": revision},
+                    "id": ctx_id,
+                    "component": {
+                        "id": ctx_id,
+                        "inheritedParameterContexts": inherited,
+                        "parameters": updated,
+                    },
+                })
+            except Exception:
+                pass
+        finally:
+            await client.close()
 
     async def _resolve_secrets(
         self,
@@ -258,9 +312,19 @@ class Deployer:
         client = await self._flow._get_client()
         try:
             providers = await client.list_parameter_providers()
-            if not providers:
+            provider_id = None
+            if providers:
+                for p in providers:
+                    if p.get("validation_status") == "VALID":
+                        provider_id = p["id"]
+                        break
+                if not provider_id:
+                    provider_id = await self._fix_or_create_parameter_provider(client, providers)
+            else:
+                provider_id = await self._ensure_parameter_provider(client)
+
+            if not provider_id:
                 return
-            provider_id = providers[0]["id"]
 
             await client.fetch_parameters(provider_id)
             await asyncio.sleep(2)
@@ -344,6 +408,79 @@ class Deployer:
         finally:
             await client.close()
 
+    async def _fix_or_create_parameter_provider(self, client, providers: list[dict]) -> str:
+        existing_provider = providers[0]
+        provider_id = existing_provider["id"]
+
+        root_svcs = await client.get_root_controller_services()
+        svc_id = None
+        for s in root_svcs:
+            comp = s.get("component", {})
+            if "snowflake" in comp.get("type", "").lower() and comp.get("state") == "ENABLED":
+                svc_id = comp["id"]
+                break
+
+        if not svc_id:
+            svc_bundle = await self._discover_bundle(client, "controller-service", "SnowflakeConnectionService")
+            svc = await client.create_root_controller_service(
+                name="Snowflake Connection (Secrets Provider)",
+                service_type="com.snowflake.openflow.runtime.services.snowflake.SnowflakeConnectionService",
+                bundle=svc_bundle,
+                properties={"Authentication Strategy": "SNOWFLAKE_SESSION_TOKEN"},
+            )
+            svc_id = svc.get("id") or svc.get("component", {}).get("id")
+            await client.enable_root_controller_service(svc_id)
+            await asyncio.sleep(3)
+
+        provider_data = await client._get(f"parameter-providers/{provider_id}")
+        prov_rev = provider_data.get("revision", {}).get("version", 0)
+        await client._put(f"parameter-providers/{provider_id}", {
+            "revision": {"version": prov_rev},
+            "component": {
+                "id": provider_id,
+                "properties": {"Snowflake Connection Service": svc_id},
+            },
+        })
+        await asyncio.sleep(2)
+        return provider_id
+
+    async def _ensure_parameter_provider(self, client) -> str:
+        svc_bundle = await self._discover_bundle(client, "controller-service", "SnowflakeConnectionService")
+        svc = await client.create_root_controller_service(
+            name="Snowflake Connection (Secrets Provider)",
+            service_type="com.snowflake.openflow.runtime.services.snowflake.SnowflakeConnectionService",
+            bundle=svc_bundle,
+            properties={"Authentication Strategy": "SNOWFLAKE_SESSION_TOKEN"},
+        )
+        svc_id = svc.get("id") or svc.get("component", {}).get("id")
+        await client.enable_root_controller_service(svc_id)
+        await asyncio.sleep(3)
+
+        prov_bundle = await self._discover_bundle(client, "parameter-provider", "SnowflakeParameterProvider")
+        provider = await client.create_parameter_provider(
+            name="Snowflake Secrets Provider",
+            provider_type="com.snowflake.openflow.runtime.parameter.snowflake.SnowflakeParameterProvider",
+            bundle=prov_bundle,
+            properties={"Snowflake Connection Service": svc_id},
+        )
+        provider_id = provider.get("id") or provider.get("component", {}).get("id")
+        await asyncio.sleep(2)
+        return provider_id
+
+    async def _discover_bundle(self, client, component_type: str, name_fragment: str) -> dict:
+        if component_type == "controller-service":
+            data = await client._get("flow/controller-service-types")
+            items = data.get("controllerServiceTypes", [])
+        elif component_type == "parameter-provider":
+            data = await client._get("flow/parameter-provider-types")
+            items = data.get("parameterProviderTypes", [])
+        else:
+            items = []
+        for t in items:
+            if name_fragment in t.get("type", ""):
+                return t["bundle"]
+        raise DeployError(f"Cannot find bundle for {name_fragment} on runtime")
+
     async def _update_params(self, pg_id: str, params: dict[str, dict[str, str]], auto_start: bool) -> bool:
         client = await self._flow._get_client()
         try:
@@ -368,9 +505,7 @@ class Deployer:
             await asyncio.sleep(2)
 
             if auto_start:
-                await client.enable_controller_services(pg_id)
-                await asyncio.sleep(1)
-                await client.start_process_group(pg_id)
+                await self._flow._robust_start(client, pg_id)
 
             return True
         finally:

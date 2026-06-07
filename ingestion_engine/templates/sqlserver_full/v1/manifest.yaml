@@ -1,0 +1,51 @@
+template_id: sqlserver_full
+version: v1
+backend: openflow
+supported_contract_versions: [v1]
+source_sgdb: sqlserver
+strategy: full
+promote_strategy: swap
+
+parameter_context: "Sqlserver Full Params"
+
+param_mapping:
+  - param: "Sqlserver Host"
+    source: "source_config.host"
+  - param: "Sqlserver Port"
+    source: "source_config.port"
+    default: "1433"
+  - param: "Sqlserver Database"
+    source: "source_config.database"
+  - param: "Sqlserver Username"
+    source: "source_config.username"
+    default: ""
+  - param: "Sqlserver Password"
+    source: "source_config.password"
+    sensitive: true
+  - param: "Sqlserver Driver"
+    type: asset
+    default: ""
+  - param: "cron"
+    source: "cron"
+    default: "0 */5 * * * ?"
+  - param: "chunk_rows"
+    source: "chunk_rows"
+    default: "5000"
+  - param: "Tables To Fetch"
+    source: "_tables_json"
+    computed: true
+  - param: "Destination Database"
+    source: "_domain"
+    transform: "upper"
+  - param: "Destination Schema"
+    default: "BRONZE"
+  - param: "Snowflake Warehouse"
+    source: "config.snowflake_warehouse"
+    default: "OPENFLOW_FACTORY_WH"
+
+secrets:
+  - "Sqlserver Password"
+
+backend_dependencies:
+  - "mssql-jdbc-13.4.0.jre11.jar"
+  - "External Access Integration"

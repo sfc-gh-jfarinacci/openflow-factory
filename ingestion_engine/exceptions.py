@@ -34,5 +34,12 @@ class NiFiClientError(IngestionEngineError):
         super().__init__(f"{method} {url} → {status}: {body[:200]}")
 
 
+class StartError(IngestionEngineError):
+    def __init__(self, message: str, bulletins: list[dict] | None = None, status: dict | None = None):
+        self.bulletins = bulletins or []
+        self.status = status or {}
+        super().__init__(message)
+
+
 class SnowflakeConnectionError(IngestionEngineError):
     pass
