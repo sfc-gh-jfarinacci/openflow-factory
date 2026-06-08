@@ -133,6 +133,19 @@ class NiFiClient:
     async def stop_process_group(self, pg_id: str) -> None:
         await self._put(f"flow/process-groups/{pg_id}", {"id": pg_id, "state": "STOPPED"})
 
+    async def list_processors(self, pg_id: str) -> list[dict]:
+        data = await self._get(f"process-groups/{pg_id}/processors")
+        return data.get("processors", [])
+
+    async def set_processor_state(self, processor_id: str, state: str) -> None:
+        proc = await self._get(f"processors/{processor_id}")
+        revision = proc.get("revision", {})
+        await self._put(f"processors/{processor_id}/run-status", {
+            "revision": revision,
+            "state": state,
+            "disconnectedNodeAcknowledged": False,
+        })
+
     async def import_flow_definition(self, parent_id: str, name: str, versioned_flow_snapshot: dict) -> dict:
         if "flowContents" in versioned_flow_snapshot:
             versioned_flow_snapshot["flowContents"]["name"] = name

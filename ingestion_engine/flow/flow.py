@@ -153,66 +153,111 @@ class Flow:
         pg_id: str,
         *,
         enable_retries: int = 3,
+        enable_timeout: float = 30.0,
+        start_timeout: float = 20.0,
+        poll_interval: float = 2.0,
     ) -> bool:
-        import nipyapi
+        for attempt in range(1, enable_retries + 1):
+            try:
+                await client.enable_controller_services(pg_id)
+            except Exception as e:
+                if attempt == enable_retries:
+                    raise StartError(
+                        f"Failed to enable controllers after {enable_retries} attempts: {e}"
+                    )
+                await asyncio.sleep(poll_interval)
+                continue
 
-        profile_name = self._runtime_name
+            enabled = await self._poll_controllers_enabled(
+                client, pg_id, timeout=enable_timeout, interval=poll_interval
+            )
+            if enabled:
+                break
 
-        def _do_start():
-            nipyapi.profiles.switch(profile_name)
-
-            for attempt in range(1, enable_retries + 1):
+            if attempt < enable_retries:
                 try:
-                    nipyapi.canvas.schedule_all_controllers(pg_id, True)
-                    break
-                except Exception as e:
-                    if attempt == enable_retries:
-                        raise StartError(
-                            f"Failed to enable controllers after {enable_retries} attempts: {e}"
-                        )
-                    try:
-                        nipyapi.canvas.schedule_all_controllers(pg_id, False)
-                    except Exception:
-                        pass
-
-            pg = nipyapi.canvas.get_process_group(pg_id, "id")
-            bulletins = pg.bulletins or []
-            errors = [
-                {"level": "ERROR", "source_name": b.bulletin.source_name, "message": b.bulletin.message}
-                for b in bulletins
-                if b.bulletin and b.bulletin.level == "ERROR"
-            ]
-            if errors:
+                    await client.disable_controller_services(pg_id)
+                    await asyncio.sleep(2)
+                except Exception:
+                    pass
+            else:
+                svcs = await client.get_controller_services_status(pg_id)
+                failed = [s for s in svcs if s["state"] != "ENABLED"]
                 raise StartError(
-                    f"Bulletin errors after enabling controllers: "
-                    f"{errors[0]['source_name']}: {errors[0]['message']}",
-                    bulletins=errors,
+                    f"Controllers failed to reach ENABLED after {enable_retries} attempts. "
+                    f"Failed: {[s['name'] for s in failed]}",
+                    status={"failed_services": failed},
                 )
 
-            if pg.disabled_count and pg.disabled_count > 0:
-                processors = nipyapi.canvas.list_all_processors(pg_id)
-                for proc in processors:
-                    if proc.component.state == "DISABLED":
-                        nipyapi.canvas.schedule_processor(proc, "STOPPED")
+        bulletins = await client.get_bulletins(pg_id)
+        errors = [b for b in bulletins if b.get("level", "").upper() == "ERROR"]
+        if errors:
+            raise StartError(
+                f"Bulletin errors after enabling controllers: "
+                f"{errors[0]['source_name']}: {errors[0]['message']}",
+                bulletins=errors,
+            )
 
-            result = nipyapi.canvas.schedule_process_group(pg_id, True)
-            if not result:
-                pg = nipyapi.canvas.get_process_group(pg_id, "id")
-                raise StartError(
-                    f"Processors did not reach RUNNING state. "
-                    f"running={pg.running_count}, stopped={pg.stopped_count}, "
-                    f"invalid={pg.invalid_count}, disabled={pg.disabled_count}",
-                    status={
-                        "running_count": pg.running_count,
-                        "stopped_count": pg.stopped_count,
-                        "invalid_count": pg.invalid_count,
-                        "disabled_count": pg.disabled_count,
-                    },
-                )
+        status = await client.get_process_group_status(pg_id)
+        if status.get("disabled_count", 0) > 0:
+            processors = await client.list_processors(pg_id)
+            for proc in processors:
+                if proc.get("component", {}).get("state") == "DISABLED":
+                    await client.set_processor_state(proc["id"], "STOPPED")
 
-            return True
+        await client.start_process_group(pg_id)
 
-        return await asyncio.to_thread(_do_start)
+        running = await self._poll_processors_running(
+            client, pg_id, timeout=start_timeout, interval=poll_interval
+        )
+        if not running:
+            status = await client.get_process_group_status(pg_id)
+            bulletins = await client.get_bulletins(pg_id)
+            errors = [b for b in bulletins if b.get("level", "").upper() == "ERROR"]
+            raise StartError(
+                f"Processors did not reach RUNNING state within {start_timeout}s. "
+                f"running={status.get('running_count')}, stopped={status.get('stopped_count')}, "
+                f"invalid={status.get('invalid_count')}, disabled={status.get('disabled_count')}",
+                bulletins=errors,
+                status=status,
+            )
+
+        return True
+
+    async def _poll_controllers_enabled(
+        self, client: NiFiClient, pg_id: str, *, timeout: float, interval: float
+    ) -> bool:
+        elapsed = 0.0
+        while elapsed < timeout:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            svcs = await client.get_controller_services_status(pg_id)
+            if not svcs:
+                return True
+            states = [s["state"] for s in svcs]
+            if all(s == "ENABLED" for s in states):
+                return True
+            if any(s == "DISABLED" for s in states):
+                return False
+        return False
+
+    async def _poll_processors_running(
+        self, client: NiFiClient, pg_id: str, *, timeout: float, interval: float
+    ) -> bool:
+        elapsed = 0.0
+        while elapsed < timeout:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            status = await client.get_process_group_status(pg_id)
+            running = status.get("running_count", 0)
+            stopped = status.get("stopped_count", 0)
+            invalid = status.get("invalid_count", 0)
+            disabled = status.get("disabled_count", 0)
+            if running > 0 and stopped == 0 and invalid == 0 and disabled == 0:
+                return True
+            if invalid > 0:
+                return False
+        return False
 
     def _load_template_spec(self, template: str) -> dict:
         from ingestion_engine.templates.loader import load_template as _load
