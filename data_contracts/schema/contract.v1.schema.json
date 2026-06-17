@@ -10,6 +10,11 @@
     },
     "type": { "enum": ["full", "cdc", "incremental"] },
     "cron": { "type": "string", "description": "NiFi Quartz cron expression (6 fields: sec min hour day month weekday)" },
+    "promote_strategy": {
+      "enum": ["merge", "append"],
+      "default": "append",
+      "description": "How incremental rows are promoted to the destination table. 'append' inserts rows as-is (suitable for immutable/event tables). 'merge' upserts rows into the destination using primary key matching via a journal table (suitable for mutable dimension tables)."
+    },
     "secrets": {
       "type": "object",
       "description": "Maps NiFi sensitive parameter names to Snowflake secret FQNs.",
@@ -29,6 +34,31 @@
     {
       "if": { "properties": { "type": { "enum": ["full", "incremental"] } } },
       "then": { "required": ["cron"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "incremental" },
+          "source_sgdb": { "enum": ["postgres", "mysql", "sqlserver"] }
+        }
+      },
+      "then": {
+        "properties": {
+          "promote_strategy": { "enum": ["merge", "append"], "default": "append" },
+          "source_config": {
+            "properties": {
+              "tables": {
+                "items": {
+                  "anyOf": [
+                    { "required": ["watermark_columns"] },
+                    { "required": ["partition_column"] }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
     },
     {
       "if": { "properties": { "source_sgdb": { "enum": ["postgres", "mysql", "sqlserver"] } } },
@@ -122,7 +152,7 @@
         "pii_columns": { "type": "array", "items": { "type": "string" }, "default": [] },
         "schema": { "type": "string", "description": "Override schema for this table." },
         "partition_column": { "type": "string", "description": "Column for chunked/parallel reads. If unset, chunk_rows is forced to 0 (single fetch)." },
-        "watermark_columns": { "type": "string", "description": "Comma-separated list of columns for incremental high-watermark tracking (e.g. 'updated_at,id'). Used by incremental/CDC strategies." },
+        "watermark_columns": { "type": "array", "items": { "type": "string" }, "description": "List of columns for incremental high-watermark tracking (e.g. ['updated_at', 'id']). Used by incremental strategies." },
         "chunk_rows": { "type": "integer", "minimum": 0, "default": 5000, "description": "Rows per chunk. Defaults to 5000 if partition_column is set, otherwise 0." },
         "has_primary_key": { "type": "boolean" },
         "pre_sql": { "type": "string", "description": "SQL to run before fetching this table." },
