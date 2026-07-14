@@ -1,0 +1,11 @@
+secrets:
+  Kafka SASL Password: OPENFLOW_FACTORY.SECRETS.KAFKA_SASL_PASSWORD
+source_config:
+  bootstrap_servers: b-1.tmpjfarinaccicluster2.u6fdvv.c8.kafka.us-west-2.amazonaws.com:9096
+  database: ANALYTICS_EVENTS
+  schema: BRONZE
+  topics: analytics_pageviews,analytics_sessions
+  username: jfarinacci
+source_sgdb: kafka
+type: consume
+version: v1

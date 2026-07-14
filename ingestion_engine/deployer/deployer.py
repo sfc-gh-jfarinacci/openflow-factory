@@ -351,15 +351,32 @@ class Deployer:
             secret_names = [fqn.split(".")[-1] for fqn in secret_fqns]
             sensitivities = {name: "SENSITIVE" for name in secret_names}
 
+            # Build mapping from Snowflake object name → NiFi param name
+            # e.g. KAFKA_SASL_PASSWORD → Kafka SASL Password
+            secret_obj_to_param = {}
+            for param_name, fqn in secrets_map.items():
+                obj_name = fqn.split(".")[-1]
+                secret_obj_to_param[obj_name] = param_name
+
             ctx_name = f"Secrets - {contract.get('_domain', 'default')}"
 
+            # Find existing context synced to this parameter group, or match by name
             all_ctxs = await client.get_parameter_contexts()
             secrets_ctx_id = None
             for c in all_ctxs:
-                if c.get("component", {}).get("name") == ctx_name:
-                    secrets_ctx_id = c.get("component", {}).get("id")
+                comp = c.get("component", {})
+                prov_cfg = comp.get("parameterProviderConfiguration")
+                if prov_cfg and prov_cfg.get("component", {}).get("parameterGroupName") == target_group["groupName"]:
+                    secrets_ctx_id = comp.get("id")
+                    ctx_name = comp.get("name", ctx_name)
                     break
+            if not secrets_ctx_id:
+                for c in all_ctxs:
+                    if c.get("component", {}).get("name") == ctx_name:
+                        secrets_ctx_id = c.get("component", {}).get("id")
+                        break
 
+            # Apply fetched parameters to sync new/updated secrets
             if not secrets_ctx_id:
                 await client.apply_fetched_parameters(provider_id, [{
                     "groupName": target_group["groupName"],
@@ -367,12 +384,17 @@ class Deployer:
                     "parameterSensitivities": sensitivities,
                     "synchronized": True,
                 }])
+                await asyncio.sleep(2)
 
                 all_ctxs = await client.get_parameter_contexts()
                 for c in all_ctxs:
                     if c.get("component", {}).get("name") == ctx_name:
                         secrets_ctx_id = c.get("component", {}).get("id")
                         break
+            else:
+                # Context exists — re-fetch to pick up any new secrets
+                await client.fetch_parameters(provider_id)
+                await asyncio.sleep(2)
 
             if not secrets_ctx_id:
                 return
@@ -392,7 +414,9 @@ class Deployer:
                     comp = s.get("component", {})
                     svc_type = comp.get("type", "").lower()
                     svc_name = comp.get("name", "").lower()
-                    if "snowflake" in svc_type or "snowflake" in svc_name:
+                    # Skip Snowflake destination services (not source connectors)
+                    svc_class = svc_type.rsplit(".", 1)[-1] if svc_type else ""
+                    if "snowflakeconnection" in svc_class:
                         continue
                     if source_sgdb not in svc_type and source_sgdb not in svc_name:
                         if "dbcp" not in svc_type and "hikari" not in svc_type and "connection" not in svc_name:
@@ -575,10 +599,16 @@ class Deployer:
             try:
                 ctx_data = await client.get_parameter_context_by_pg(pg_id)
                 ctx_id = None
+                inherited_ctx_ids = []
                 if ctx_data:
                     ctx_id = ctx_data.get("component", {}).get("id") or ctx_data.get("id")
                     ctx_rev = ctx_data.get("revision", {}).get("version", 0)
                     inherited = ctx_data.get("component", {}).get("inheritedParameterContexts", [])
+                    # Collect inherited context IDs for cleanup
+                    for ic in inherited:
+                        ic_id = ic.get("component", {}).get("id") or ic.get("id")
+                        if ic_id:
+                            inherited_ctx_ids.append(ic_id)
                     if inherited:
                         await client._put(f"parameter-contexts/{ctx_id}", {
                             "revision": {"version": ctx_rev},
@@ -593,6 +623,7 @@ class Deployer:
                 await asyncio.sleep(3)
                 await client.delete_process_group(pg_id)
 
+                # Delete the main parameter context if unbound
                 if ctx_id:
                     try:
                         ctx_fresh = await client._get(f"parameter-contexts/{ctx_id}")
@@ -600,6 +631,19 @@ class Deployer:
                         bound = ctx_fresh.get("component", {}).get("boundProcessGroups", [])
                         if not bound:
                             await client._delete(f"parameter-contexts/{ctx_id}?version={fresh_rev}")
+                    except Exception:
+                        pass
+
+                # Delete inherited contexts that are no longer bound to any PG
+                for ic_id in inherited_ctx_ids:
+                    try:
+                        ic_fresh = await client._get(f"parameter-contexts/{ic_id}")
+                        ic_rev = ic_fresh.get("revision", {}).get("version", 0)
+                        ic_bound = ic_fresh.get("component", {}).get("boundProcessGroups", [])
+                        ic_name = ic_fresh.get("component", {}).get("name", "")
+                        # Don't delete shared contexts (like Secrets - *)
+                        if not ic_bound and "Secrets" not in ic_name:
+                            await client._delete(f"parameter-contexts/{ic_id}?version={ic_rev}")
                     except Exception:
                         pass
             except Exception as e:

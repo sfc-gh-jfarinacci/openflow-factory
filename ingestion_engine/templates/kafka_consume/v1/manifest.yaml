@@ -1,0 +1,176 @@
+template_id: kafka_consume
+version: v1
+backend: openflow
+supported_contract_versions: [v1]
+source_sgdb: kafka
+strategy: consume
+promote_strategy: append
+
+parameter_context: "Kafka SASL Ingestion Parameters"
+
+parameter_contexts:
+  - name: "Kafka SASL Source Parameters"
+    description: "Kafka broker connection and Schema Registry settings"
+  - name: "Kafka SASL Destination Parameters"
+    description: "Snowflake target connection settings"
+  - name: "Kafka SASL Ingestion Parameters"
+    description: "Topic consumption, format, and feature-flag settings"
+    inherits:
+      - "Kafka SASL Source Parameters"
+      - "Kafka SASL Destination Parameters"
+
+param_mapping:
+  # ─── Kafka SASL Source Parameters (required) ───
+  - param: "Kafka Bootstrap Servers"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.bootstrap_servers"
+    required: true
+  - param: "Kafka SASL Username"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.username"
+    required: true
+  - param: "Kafka SASL Password"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.password"
+    sensitive: true
+    required: true
+  - param: "Kafka Security Protocol"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.security_protocol"
+    default: "SASL_SSL"
+    required: false
+  - param: "Kafka SASL Mechanism"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.sasl_mechanism"
+    default: "SCRAM-SHA-512"
+    required: false
+
+  # ─── Kafka SASL Source Parameters (optional – Schema Registry) ───
+  - param: "Schema Registry URL"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.schema_registry_url"
+    required: false
+  - param: "Schema Registry Username"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.schema_registry_username"
+    required: false
+  - param: "Schema Registry Password"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.schema_registry_password"
+    sensitive: true
+    required: false
+  - param: "Schema Registry Authentication Type"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.schema_registry_auth_type"
+    default: "NONE"
+    required: false
+  - param: "AVRO Schema Access Strategy"
+    context: "Kafka SASL Source Parameters"
+    source: "source_config.avro_schema_access_strategy"
+    default: "embedded-avro-schema"
+    required: false
+
+  # ─── Kafka SASL Destination Parameters (required) ───
+  - param: "Destination Database"
+    context: "Kafka SASL Destination Parameters"
+    source: "source_config.database"
+    transform: "upper"
+    required: true
+  - param: "Destination Schema"
+    context: "Kafka SASL Destination Parameters"
+    source: "source_config.schema"
+    default: "BRONZE"
+    required: true
+
+  # ─── Kafka SASL Destination Parameters (optional – Snowflake auth) ───
+  - param: "Snowflake Account Identifier"
+    context: "Kafka SASL Destination Parameters"
+    source: "config.snowflake_account"
+    required: false
+  - param: "Snowflake Username"
+    context: "Kafka SASL Destination Parameters"
+    source: "config.snowflake_username"
+    required: false
+  - param: "Snowflake Role"
+    context: "Kafka SASL Destination Parameters"
+    source: "config.snowflake_role"
+    default: "OPENFLOW_ADMIN"
+    required: false
+  - param: "Snowflake Authentication Strategy"
+    context: "Kafka SASL Destination Parameters"
+    source: "config.snowflake_auth_strategy"
+    default: "SNOWFLAKE_MANAGED"
+    required: false
+  - param: "Snowflake Private Key"
+    context: "Kafka SASL Destination Parameters"
+    source: "config.snowflake_private_key"
+    sensitive: true
+    required: false
+  - param: "Snowflake Private Key File"
+    context: "Kafka SASL Destination Parameters"
+    source: "config.snowflake_private_key_file"
+    required: false
+  - param: "Snowflake Private Key Password"
+    context: "Kafka SASL Destination Parameters"
+    source: "config.snowflake_private_key_password"
+    sensitive: true
+    required: false
+
+  # ─── Kafka SASL Ingestion Parameters (required) ───
+  - param: "Kafka Topics"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.topics"
+    required: true
+  - param: "Message Format"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.message_format"
+    default: "JSON"
+    required: false
+
+  # ─── Kafka SASL Ingestion Parameters (optional) ───
+  - param: "Kafka Group Id"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.group_id"
+    default: "openflow_msk_connector"
+    required: false
+  - param: "Kafka Auto Offset Reset"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.auto_offset_reset"
+    default: "earliest"
+    required: false
+  - param: "Kafka DLQ Topic"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.dlq_topic"
+    required: false
+  - param: "Kafka Topic Format"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.topic_format"
+    default: "names"
+    required: false
+  - param: "AVRO Schema"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.avro_schema"
+    required: false
+  - param: "Iceberg Enabled"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.iceberg_enabled"
+    default: "false"
+    required: false
+  - param: "Schematization Enabled"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.schematization_enabled"
+    default: "true"
+    required: false
+  - param: "Topic To Table Map"
+    context: "Kafka SASL Ingestion Parameters"
+    source: "source_config.topic_to_table_map"
+    required: false
+
+secrets:
+  - "Kafka SASL Password"
+  - "Schema Registry Password"
+  - "Snowflake Private Key"
+  - "Snowflake Private Key Password"
+
+backend_dependencies:
+  - "External Access Integration"

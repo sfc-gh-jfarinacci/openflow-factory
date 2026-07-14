@@ -8,7 +8,7 @@
     "source_sgdb": {
       "enum": ["postgres", "mysql", "sqlserver", "mongodb", "kafka", "s3"]
     },
-    "type": { "enum": ["full", "cdc", "incremental"] },
+    "type": { "enum": ["full", "cdc", "incremental", "consume"] },
     "cron": { "type": "string", "description": "NiFi Quartz cron expression (6 fields: sec min hour day month weekday)" },
     "promote_strategy": {
       "enum": ["merge", "append"],
@@ -32,7 +32,7 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "type": { "enum": ["full", "incremental"] } } },
+      "if": { "properties": { "type": { "enum": ["full", "incremental"] } }, "required": ["type"] },
       "then": { "required": ["cron"] }
     },
     {
@@ -206,19 +206,28 @@
     },
     "kafka_source_config": {
       "type": "object",
-      "required": ["brokers", "topics"],
+      "required": ["bootstrap_servers", "username", "database", "schema", "topics"],
       "properties": {
-        "brokers": { "type": "string", "description": "Comma-separated broker list." },
-        "topics": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "type": "string" }
-        },
-        "consumer_group": { "type": "string", "description": "Consumer group ID. Defaults to flow name." },
-        "offset_reset": { "type": "string", "enum": ["earliest", "latest"], "default": "earliest" },
-        "schema_registry_url": { "type": "string", "description": "Confluent Schema Registry URL (if using Avro/Protobuf)." },
-        "key_deserializer": { "type": "string", "enum": ["string", "avro", "json"], "default": "string" },
-        "value_deserializer": { "type": "string", "enum": ["string", "avro", "json"], "default": "json" }
+        "bootstrap_servers": { "type": "string", "minLength": 1, "description": "Comma-separated broker list (host:port)." },
+        "username": { "type": "string", "minLength": 1, "description": "SASL username." },
+        "database": { "type": "string", "minLength": 1, "description": "Snowflake destination database." },
+        "schema": { "type": "string", "minLength": 1, "description": "Snowflake destination schema." },
+        "topics": { "type": "string", "minLength": 1, "description": "Comma-separated topic names or pattern." },
+        "security_protocol": { "type": "string", "enum": ["SASL_SSL", "SASL_PLAINTEXT", "SSL", "PLAINTEXT"], "default": "SASL_SSL" },
+        "sasl_mechanism": { "type": "string", "enum": ["SCRAM-SHA-512", "SCRAM-SHA-256", "PLAIN", "OAUTHBEARER"], "default": "SCRAM-SHA-512" },
+        "group_id": { "type": "string", "description": "Consumer group ID. Defaults to 'openflow_msk_connector'." },
+        "auto_offset_reset": { "type": "string", "enum": ["earliest", "latest"], "default": "earliest" },
+        "message_format": { "type": "string", "enum": ["JSON", "AVRO", "CONFLUENT_ENCODED"], "default": "JSON" },
+        "topic_format": { "type": "string", "enum": ["names", "pattern"], "default": "names", "description": "Whether 'topics' is a list of names or a regex pattern." },
+        "dlq_topic": { "type": "string", "description": "Dead-letter queue topic for failed messages." },
+        "schema_registry_url": { "type": "string", "description": "Confluent Schema Registry URL (required for AVRO/CONFLUENT_ENCODED)." },
+        "schema_registry_username": { "type": "string" },
+        "schema_registry_auth_type": { "type": "string", "enum": ["NONE", "BASIC", "URL"], "default": "NONE" },
+        "avro_schema": { "type": "string", "description": "Inline AVRO schema (optional, alternative to registry)." },
+        "avro_schema_access_strategy": { "type": "string", "default": "embedded-avro-schema" },
+        "iceberg_enabled": { "type": "string", "enum": ["true", "false"], "default": "false", "description": "Write to Iceberg tables." },
+        "schematization_enabled": { "type": "string", "enum": ["true", "false"], "default": "true", "description": "Auto-evolve destination schema from messages." },
+        "topic_to_table_map": { "type": "string", "description": "JSON mapping of topic names to table names (optional)." }
       }
     },
     "s3_source_config": {

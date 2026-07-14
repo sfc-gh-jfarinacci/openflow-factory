@@ -1,0 +1,13 @@
+version: v1
+source_sgdb: kafka
+type: consume
+
+secrets:
+  Kafka SASL Password: OPENFLOW_FACTORY.SECRETS.KAFKA_SASL_PASSWORD
+
+source_config:
+  bootstrap_servers: b-1.tmpjfarinaccicluster2.u6fdvv.c8.kafka.us-west-2.amazonaws.com:9096,b-2.tmpjfarinaccicluster2.u6fdvv.c8.kafka.us-west-2.amazonaws.com:9096
+  username: jfarinacci
+  database: STREAMING_EVENTS
+  schema: BRONZE
+  topics: ecommerce_orders,ecommerce_clicks

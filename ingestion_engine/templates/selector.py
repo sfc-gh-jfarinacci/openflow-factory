@@ -15,6 +15,7 @@ SGDB_STRATEGY_MAP = {
     ("sqlserver", "cdc"): "sqlserver_cdc",
     ("sqlserver", "incremental"): "sqlserver_incremental",
     ("mongodb", "cdc"): "mongodb_cdc",
+    ("kafka", "consume"): "kafka_consume",
 }
 
 

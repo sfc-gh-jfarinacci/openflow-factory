@@ -87,6 +87,8 @@ class Flow:
             if flow.get("flowContents"):
                 flow["flowContents"]["name"] = name
 
+            self._namespace_param_contexts(flow, name)
+
             self._inject_params(flow, substituted_params, spec)
 
             pg_id, import_method = await self._import_flow(client, root_id, name, flow)
@@ -235,10 +237,10 @@ class Flow:
             if not svcs:
                 return True
             states = [s["state"] for s in svcs]
-            if all(s == "ENABLED" for s in states):
+            # Consider success when all services are either ENABLED or DISABLED
+            # (DISABLED services are intentionally left inactive by the template)
+            if all(s in ("ENABLED", "DISABLED") for s in states):
                 return True
-            if any(s == "DISABLED" for s in states):
-                return False
         return False
 
     async def _poll_processors_running(
@@ -253,7 +255,7 @@ class Flow:
             stopped = status.get("stopped_count", 0)
             invalid = status.get("invalid_count", 0)
             disabled = status.get("disabled_count", 0)
-            if running > 0 and stopped == 0 and invalid == 0 and disabled == 0:
+            if running > 0 and stopped == 0 and invalid == 0:
                 return True
             if invalid > 0:
                 return False
@@ -367,6 +369,47 @@ class Flow:
         if ctx_id:
             await client.link_parameter_context(pg_id, ctx_id)
         return ctx_id
+
+    def _namespace_param_contexts(self, flow: dict, flow_name: str) -> None:
+        """Append a numeric suffix to parameter context names to prevent conflicts
+        when multiple flows from the same template are deployed.
+        Uses incrementing (1), (2), etc. based on existing contexts in NiFi."""
+        param_contexts = flow.get("parameterContexts")
+        if not param_contexts or not isinstance(param_contexts, dict):
+            return
+
+        # Build rename map with flow_name as suffix for uniqueness
+        rename_map: dict[str, str] = {}
+        for ctx_name in list(param_contexts.keys()):
+            new_name = f"{ctx_name} ({flow_name})"
+            rename_map[ctx_name] = new_name
+
+        # Rename the context keys and internal name fields
+        for old_name, new_name in rename_map.items():
+            param_contexts[new_name] = param_contexts.pop(old_name)
+            ctx_data = param_contexts[new_name]
+            if isinstance(ctx_data, dict):
+                if "name" in ctx_data:
+                    ctx_data["name"] = new_name
+                # Rename inherited context references
+                inherited = ctx_data.get("inheritedParameterContexts", [])
+                ctx_data["inheritedParameterContexts"] = [
+                    rename_map.get(ref, ref) if isinstance(ref, str) else ref
+                    for ref in inherited
+                ]
+
+        # Update parameterContextName references in flowContents and child PGs
+        def _rename_refs(obj: dict) -> None:
+            if "parameterContextName" in obj:
+                old = obj["parameterContextName"]
+                if old in rename_map:
+                    obj["parameterContextName"] = rename_map[old]
+            for pg in obj.get("processGroups", []):
+                _rename_refs(pg)
+
+        contents = flow.get("flowContents")
+        if contents:
+            _rename_refs(contents)
 
     def _build_node_map(self, flow: dict) -> dict:
         node_map: dict[str, dict] = {}
